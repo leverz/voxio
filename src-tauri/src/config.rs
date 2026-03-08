@@ -31,6 +31,22 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    pub fn whisper_language(&self) -> Option<&str> {
+        match self.language.as_str() {
+            "auto" => None,
+            value => Some(value),
+        }
+    }
+
+    pub fn whisper_model(&self) -> &str {
+        match self.model {
+            ModelSize::Base => "base",
+            ModelSize::Small => "small",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InjectionMode {
@@ -77,4 +93,3 @@ impl ConfigStore {
         Ok(())
     }
 }
-

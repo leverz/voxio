@@ -220,7 +220,7 @@ export function App() {
           Current shortcut <strong>{settings.hotkey}</strong>
         </div>
         <div className="hero__hint hero__hint--warning">
-          Current build pastes a placeholder transcript when dictation stops.
+          Current build records audio and attempts local Whisper transcription.
         </div>
       </section>
 

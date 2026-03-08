@@ -5,7 +5,14 @@ use crate::{
     app::{current_snapshot, detect_permissions, emit_state_changed, PermissionStatus},
     config::{ConfigStore, Settings},
     error::{Result, VoxioError},
-    modules::injector::build_injector,
+    modules::{
+        asr::transcribe_file,
+        audio::{
+            clear_active_recording, start_recording, stop_recording, store_active_recording,
+            take_active_recording,
+        },
+        injector::build_injector,
+    },
     state::{AppState, DictationState},
 };
 
@@ -61,6 +68,9 @@ pub fn start_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot>
 
     match session.state {
         DictationState::Idle | DictationState::Error => {
+            let recording = start_recording()?;
+            store_active_recording(recording);
+
             session.state = DictationState::Listening;
             session.session_id = Some(Uuid::new_v4());
             session.last_error = None;
@@ -91,24 +101,41 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
                 let settings = state.settings.lock().expect("settings mutex poisoned");
                 settings.clone()
             };
-            let transcript = "Voxio placeholder transcript. Speech recognition is not connected yet.";
-            let injector = build_injector(&settings.injection_mode);
-            let inject_result = injector.inject(transcript);
+            let result = (|| -> Result<String> {
+                let recording = take_active_recording().ok_or_else(|| {
+                    VoxioError::Recording("no active recording session".to_string())
+                })?;
+                let artifact = stop_recording(recording)?;
+                let _sample_count = artifact.sample_count;
+                let transcription = transcribe_file(&artifact.wav_path, &settings)?;
+                let transcript = transcription.text.trim().to_string();
+                if transcript.is_empty() {
+                    return Err(VoxioError::Transcription(
+                        "whisper returned an empty transcript".to_string(),
+                    ));
+                }
+
+                let injector = build_injector(&settings.injection_mode);
+                let inject_result = injector.inject(&transcript)?;
+                if !inject_result.applied {
+                    return Err(VoxioError::Injection(
+                        "no text was available to inject".to_string(),
+                    ));
+                }
+
+                Ok(transcript)
+            })();
 
             let mut session = state.session.lock().expect("session mutex poisoned");
-            session.last_transcript = Some(transcript.into());
-
-            match inject_result {
-                Ok(result) if result.applied => {
+            match result {
+                Ok(transcript) => {
+                    session.last_transcript = Some(transcript);
                     session.state = DictationState::Idle;
                     session.last_error = None;
                 }
-                Ok(_) => {
-                    session.state = DictationState::Error;
-                    session.last_error = Some("No text was available to inject.".into());
-                }
                 Err(error) => {
                     session.state = DictationState::Error;
+                    session.last_transcript = None;
                     session.last_error = Some(error.to_string());
                 }
             }
@@ -131,6 +158,7 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
 #[tauri::command]
 pub fn cancel_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> {
     let state = app.state::<AppState>();
+    clear_active_recording();
     let mut session = state.session.lock().expect("session mutex poisoned");
     session.state = DictationState::Idle;
     session.session_id = None;

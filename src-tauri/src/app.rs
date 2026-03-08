@@ -41,10 +41,6 @@ pub fn emit_state_changed(app: &AppHandle, snapshot: AppStateSnapshot) {
     );
 }
 
-pub fn get_state<'a>(app: &'a AppHandle) -> tauri::State<'a, AppState> {
-    app.state::<AppState>()
-}
-
 pub fn current_snapshot(app: &AppHandle) -> AppStateSnapshot {
     let state = app.state::<AppState>();
     let session = state.session.lock().expect("session mutex poisoned");

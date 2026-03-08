@@ -6,6 +6,10 @@ pub type Result<T> = std::result::Result<T, VoxioError>;
 pub enum VoxioError {
     #[error("{0}")]
     Validation(String),
+    #[error("recording failed: {0}")]
+    Recording(String),
+    #[error("transcription failed: {0}")]
+    Transcription(String),
     #[error("input injection failed: {0}")]
     Injection(String),
     #[error("io error: {0}")]
