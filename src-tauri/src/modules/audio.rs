@@ -12,6 +12,8 @@ use hound::{SampleFormat as WavSampleFormat, WavSpec, WavWriter};
 
 use crate::error::{Result, VoxioError};
 
+const WHISPER_SAMPLE_RATE: u32 = 16_000;
+
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
     pub samples: Vec<i16>,
@@ -98,20 +100,26 @@ pub fn start_recording() -> Result<RecordingSession> {
 pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> {
     drop(recording.stream);
 
-    let samples = recording
+    let captured_samples = recording
         .buffer
         .lock()
         .expect("audio buffer mutex poisoned")
         .clone();
-    if samples.is_empty() {
+    if captured_samples.is_empty() {
         return Err(VoxioError::Recording(
             "no audio samples were captured".to_string(),
+        ));
+    }
+    let resampled_samples = resample_to_whisper_rate(&captured_samples, recording.sample_rate);
+    if resampled_samples.is_empty() {
+        return Err(VoxioError::Recording(
+            "failed to resample recorded audio".to_string(),
         ));
     }
 
     let spec = WavSpec {
         channels: 1,
-        sample_rate: recording.sample_rate,
+        sample_rate: WHISPER_SAMPLE_RATE,
         bits_per_sample: 16,
         sample_format: WavSampleFormat::Int,
     };
@@ -120,7 +128,7 @@ pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> 
     {
         let mut writer = WavWriter::new(&mut buffer, spec)
             .map_err(|error| VoxioError::Recording(format!("failed to create wav buffer: {error}")))?;
-        for sample in &samples {
+        for sample in &resampled_samples {
             writer
                 .write_sample(*sample)
                 .map_err(|error| VoxioError::Recording(format!("failed to write wav sample: {error}")))?;
@@ -132,7 +140,7 @@ pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> 
 
     Ok(RecordingArtifact {
         wav_bytes: buffer.into_inner(),
-        sample_count: samples.len(),
+        sample_count: resampled_samples.len(),
     })
 }
 
@@ -220,4 +228,33 @@ fn append_i16_samples(data: &[i16], channels: u16, buffer: &Arc<Mutex<Vec<i16>>>
     for frame in data.chunks(channels as usize) {
         target.push(frame[0]);
     }
+}
+
+fn resample_to_whisper_rate(samples: &[i16], input_sample_rate: u32) -> Vec<i16> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    if input_sample_rate == WHISPER_SAMPLE_RATE {
+        return samples.to_vec();
+    }
+
+    let output_len =
+        ((samples.len() as u64) * (WHISPER_SAMPLE_RATE as u64) / (input_sample_rate as u64))
+            .max(1) as usize;
+    let ratio = input_sample_rate as f64 / WHISPER_SAMPLE_RATE as f64;
+    let mut output = Vec::with_capacity(output_len);
+
+    for index in 0..output_len {
+        let source_position = index as f64 * ratio;
+        let left_index = source_position.floor() as usize;
+        let right_index = (left_index + 1).min(samples.len().saturating_sub(1));
+        let fraction = source_position - left_index as f64;
+        let left = samples[left_index] as f64;
+        let right = samples[right_index] as f64;
+        let interpolated = left + (right - left) * fraction;
+        output.push(interpolated.round() as i16);
+    }
+
+    output
 }

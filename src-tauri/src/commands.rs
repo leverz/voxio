@@ -11,7 +11,7 @@ use crate::{
     config::{ConfigStore, Settings},
     error::{Result, VoxioError},
     modules::{
-        asr::transcribe_wav_bytes,
+        asr::{prewarm_provider, transcribe_wav_bytes},
         audio::{
             clear_active_recording, start_recording, stop_recording, store_active_recording,
             take_active_recording,
@@ -80,8 +80,15 @@ pub fn start_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot>
             session.session_id = Some(Uuid::new_v4());
             session.last_error = None;
             let snapshot = session.snapshot();
+            let settings = {
+                let settings = state.settings.lock().expect("settings mutex poisoned");
+                settings.clone()
+            };
             drop(session);
             emit_state_changed(&app, snapshot.clone());
+            thread::spawn(move || {
+                prewarm_provider(&settings);
+            });
             Ok(snapshot)
         }
         DictationState::Listening | DictationState::Processing => Err(VoxioError::Validation(
