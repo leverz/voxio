@@ -1,0 +1,80 @@
+use std::{fs, path::PathBuf};
+
+use dirs::config_dir;
+use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    pub hotkey: String,
+    pub language: String,
+    pub auto_punctuation: bool,
+    pub silence_timeout_ms: u64,
+    pub injection_mode: InjectionMode,
+    pub model: ModelSize,
+    pub launch_at_login: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            hotkey: "Option+Space".to_string(),
+            language: "auto".to_string(),
+            auto_punctuation: true,
+            silence_timeout_ms: 1200,
+            injection_mode: InjectionMode::Auto,
+            model: ModelSize::Base,
+            launch_at_login: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InjectionMode {
+    Auto,
+    Accessibility,
+    Clipboard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelSize {
+    Base,
+    Small,
+}
+
+pub struct ConfigStore {
+    path: PathBuf,
+}
+
+impl ConfigStore {
+    pub fn new() -> Self {
+        let mut path = config_dir().unwrap_or_else(|| PathBuf::from("."));
+        path.push("voxio");
+        path.push("config.json");
+        Self { path }
+    }
+
+    pub fn load(&self) -> Result<Settings> {
+        if !self.path.exists() {
+            return Ok(Settings::default());
+        }
+
+        let content = fs::read_to_string(&self.path)?;
+        Ok(serde_json::from_str(&content)?)
+    }
+
+    pub fn save(&self, settings: &Settings) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let json = serde_json::to_string_pretty(settings)?;
+        fs::write(&self.path, json)?;
+        Ok(())
+    }
+}
+
