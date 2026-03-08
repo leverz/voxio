@@ -26,7 +26,9 @@ const DEFAULT_SETTINGS: Settings = {
   autoPunctuation: true,
   silenceTimeoutMs: 1200,
   injectionMode: "auto",
-  model: "base",
+  transcriptionProvider: "local",
+  cloudModel: "fast",
+  model: "balanced",
   launchAtLogin: false,
 };
 
@@ -327,6 +329,22 @@ export function App() {
               </select>
             </label>
             <label>
+              Transcription
+              <select
+                value={settings.transcriptionProvider}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    transcriptionProvider: event.target.value as Settings["transcriptionProvider"],
+                  }))
+                }
+              >
+                <option value="local">Local only</option>
+                <option value="cloud">Cloud only</option>
+                <option value="auto">Auto fallback</option>
+              </select>
+            </label>
+            <label>
               Model
               <select
                 value={settings.model}
@@ -337,8 +355,24 @@ export function App() {
                   }))
                 }
               >
-                <option value="base">Base</option>
-                <option value="small">Small</option>
+                <option value="fast">Fast (Tiny)</option>
+                <option value="balanced">Balanced (Base)</option>
+                <option value="small">Accurate (Small)</option>
+              </select>
+            </label>
+            <label>
+              Cloud model
+              <select
+                value={settings.cloudModel}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    cloudModel: event.target.value as Settings["cloudModel"],
+                  }))
+                }
+              >
+                <option value="fast">Fast (4o mini)</option>
+                <option value="accurate">Accurate (4o)</option>
               </select>
             </label>
             <label className="toggle">

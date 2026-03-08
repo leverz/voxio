@@ -19,11 +19,12 @@ export interface Settings {
   autoPunctuation: boolean;
   silenceTimeoutMs: number;
   injectionMode: "auto" | "accessibility" | "clipboard";
-  model: "base" | "small";
+  transcriptionProvider: "local" | "cloud" | "auto";
+  cloudModel: "fast" | "accurate";
+  model: "fast" | "balanced" | "small";
   launchAtLogin: boolean;
 }
 
 export interface StateChangedEvent {
   snapshot: AppStateSnapshot;
 }
-

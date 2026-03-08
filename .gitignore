@@ -4,4 +4,4 @@ dist
 target
 src-tauri/target
 src-tauri/gen
-
+models/whisper/partial

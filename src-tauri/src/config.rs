@@ -13,6 +13,8 @@ pub struct Settings {
     pub auto_punctuation: bool,
     pub silence_timeout_ms: u64,
     pub injection_mode: InjectionMode,
+    pub transcription_provider: TranscriptionProvider,
+    pub cloud_model: CloudModel,
     pub model: ModelSize,
     pub launch_at_login: bool,
 }
@@ -25,7 +27,9 @@ impl Default for Settings {
             auto_punctuation: true,
             silence_timeout_ms: 1200,
             injection_mode: InjectionMode::Auto,
-            model: ModelSize::Base,
+            transcription_provider: TranscriptionProvider::Local,
+            cloud_model: CloudModel::Fast,
+            model: ModelSize::Balanced,
             launch_at_login: false,
         }
     }
@@ -41,8 +45,16 @@ impl Settings {
 
     pub fn whisper_model(&self) -> &str {
         match self.model {
-            ModelSize::Base => "base",
+            ModelSize::Fast => "tiny",
+            ModelSize::Balanced => "base",
             ModelSize::Small => "small",
+        }
+    }
+
+    pub fn openai_transcription_model(&self) -> &str {
+        match self.cloud_model {
+            CloudModel::Fast => "gpt-4o-mini-transcribe",
+            CloudModel::Accurate => "gpt-4o-transcribe",
         }
     }
 }
@@ -57,8 +69,27 @@ pub enum InjectionMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum TranscriptionProvider {
+    Local,
+    Cloud,
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CloudModel {
+    Fast,
+    Accurate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ModelSize {
-    Base,
+    #[serde(alias = "tiny")]
+    Fast,
+    #[serde(alias = "base")]
+    Balanced,
+    #[serde(alias = "small")]
     Small,
 }
 
