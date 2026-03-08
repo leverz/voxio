@@ -12,14 +12,32 @@ What is implemented now:
 - Global shortcut registration through the Tauri shortcut plugin
 - Clipboard-based text injection with simulated paste
 - Local config persistence
-- Placeholder Rust modules for hotkey, audio, ASR, and text injection
+- Local audio capture and offline transcription path
 
 What is not implemented yet:
 
 - Continuous microphone capture and VAD
-- Whisper-based speech recognition
+- Streaming or persistent low-latency ASR session
 - Accessibility-native text injection
 - Rich native permission requests and onboarding
+
+## ASR provider order
+
+The app currently tries providers in this order:
+
+1. `whisper-cpp` via `/opt/homebrew/bin/whisper-cli`
+2. `openai-whisper` Python CLI as a fallback when no local GGML model is configured
+
+The repository currently includes a lightweight local model at:
+
+- `models/whisper/ggml-tiny-q5_1.bin`
+
+You can override the `whisper-cpp` paths with:
+
+```bash
+export VOXIO_WHISPER_CPP_BIN=/custom/path/to/whisper-cli
+export VOXIO_WHISPER_CPP_MODEL=/custom/path/to/ggml-model.bin
+```
 
 ## Development
 
