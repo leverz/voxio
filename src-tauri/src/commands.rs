@@ -1,3 +1,8 @@
+use std::{
+    sync::mpsc,
+    thread,
+};
+
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -6,7 +11,7 @@ use crate::{
     config::{ConfigStore, Settings},
     error::{Result, VoxioError},
     modules::{
-        asr::transcribe_file,
+        asr::transcribe_wav_bytes,
         audio::{
             clear_active_recording, start_recording, stop_recording, store_active_recording,
             take_active_recording,
@@ -94,6 +99,7 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
         DictationState::Listening => {
             session.state = DictationState::Processing;
             let processing_snapshot = session.snapshot();
+            let session_id = session.session_id;
             drop(session);
             emit_state_changed(&app, processing_snapshot);
 
@@ -101,49 +107,41 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
                 let settings = state.settings.lock().expect("settings mutex poisoned");
                 settings.clone()
             };
-            let result = (|| -> Result<String> {
-                let recording = take_active_recording().ok_or_else(|| {
-                    VoxioError::Recording("no active recording session".to_string())
-                })?;
-                let artifact = stop_recording(recording)?;
-                let _sample_count = artifact.sample_count;
-                let transcription = transcribe_file(&artifact.wav_path, &settings)?;
-                let transcript = transcription.text.trim().to_string();
-                if transcript.is_empty() {
-                    return Err(VoxioError::Transcription(
-                        "whisper returned an empty transcript".to_string(),
-                    ));
-                }
-
-                let injector = build_injector(&settings.injection_mode);
-                let inject_result = injector.inject(&transcript)?;
-                if !inject_result.applied {
-                    return Err(VoxioError::Injection(
-                        "no text was available to inject".to_string(),
-                    ));
-                }
-
-                Ok(transcript)
-            })();
-
-            let mut session = state.session.lock().expect("session mutex poisoned");
-            match result {
-                Ok(transcript) => {
-                    session.last_transcript = Some(transcript);
-                    session.state = DictationState::Idle;
-                    session.last_error = None;
-                }
+            let recording = take_active_recording()
+                .ok_or_else(|| VoxioError::Recording("no active recording session".to_string()))?;
+            let artifact = match stop_recording(recording) {
+                Ok(artifact) => artifact,
                 Err(error) => {
-                    session.state = DictationState::Error;
-                    session.last_transcript = None;
-                    session.last_error = Some(error.to_string());
+                    let snapshot = finalize_processing(
+                        &app,
+                        session_id,
+                        Err(error),
+                    );
+                    return Ok(snapshot);
                 }
-            }
+            };
 
-            let final_snapshot = session.snapshot();
-            drop(session);
-            emit_state_changed(&app, final_snapshot.clone());
-            Ok(final_snapshot)
+            let app_handle = app.clone();
+            thread::spawn(move || {
+                let result = (|| -> Result<String> {
+                    let _sample_count = artifact.sample_count;
+                    let transcription = transcribe_wav_bytes(&artifact.wav_bytes, &settings)?;
+                    let transcript = transcription.text.trim().to_string();
+                    if transcript.is_empty() {
+                        return Err(VoxioError::Transcription(
+                            "whisper returned an empty transcript".to_string(),
+                        ));
+                    }
+
+                    inject_transcript(&app_handle, transcript.clone(), settings.injection_mode.clone())?;
+
+                    Ok(transcript)
+                })();
+
+                finalize_processing(&app_handle, session_id, result);
+            });
+
+            Ok(current_snapshot(&app))
         }
         DictationState::Idle => Err(VoxioError::Validation(
             "No active dictation session to stop.".to_string(),
@@ -153,6 +151,68 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
         )),
         DictationState::Error => Ok(current_snapshot(&app)),
     }
+}
+
+fn inject_transcript(
+    app: &AppHandle,
+    transcript: String,
+    injection_mode: crate::config::InjectionMode,
+) -> Result<()> {
+    let (sender, receiver) = mpsc::channel();
+
+    app.run_on_main_thread(move || {
+        let result = (|| -> Result<()> {
+            let injector = build_injector(&injection_mode);
+            let inject_result = injector.inject(&transcript)?;
+            if !inject_result.applied {
+                return Err(VoxioError::Injection(
+                    "no text was available to inject".to_string(),
+                ));
+            }
+
+            Ok(())
+        })();
+
+        let _ = sender.send(result);
+    })
+    .map_err(|error| VoxioError::Injection(format!("failed to schedule text injection: {error}")))?;
+
+    receiver
+        .recv()
+        .map_err(|error| VoxioError::Injection(format!("failed to receive injection result: {error}")))?
+}
+
+fn finalize_processing(
+    app: &AppHandle,
+    session_id: Option<Uuid>,
+    result: Result<String>,
+) -> crate::state::AppStateSnapshot {
+    let state = app.state::<AppState>();
+    let mut session = state.session.lock().expect("session mutex poisoned");
+
+    let session_still_active =
+        session.state == DictationState::Processing && session.session_id == session_id;
+    if !session_still_active {
+        return session.snapshot();
+    }
+
+    match result {
+        Ok(transcript) => {
+            session.last_transcript = Some(transcript);
+            session.state = DictationState::Idle;
+            session.last_error = None;
+        }
+        Err(error) => {
+            session.state = DictationState::Error;
+            session.last_transcript = None;
+            session.last_error = Some(error.to_string());
+        }
+    }
+
+    let snapshot = session.snapshot();
+    drop(session);
+    emit_state_changed(app, snapshot.clone());
+    snapshot
 }
 
 #[tauri::command]

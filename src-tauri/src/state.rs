@@ -14,7 +14,7 @@ pub struct AppStateSnapshot {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DictationState {
     Idle,

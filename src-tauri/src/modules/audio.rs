@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    path::PathBuf,
+    io::Cursor,
     sync::{Arc, Mutex},
 };
 
@@ -51,7 +51,7 @@ pub struct RecordingSession {
 }
 
 pub struct RecordingArtifact {
-    pub wav_path: PathBuf,
+    pub wav_bytes: Vec<u8>,
     pub sample_count: usize,
 }
 
@@ -109,9 +109,6 @@ pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> 
         ));
     }
 
-    let mut wav_path = std::env::temp_dir();
-    wav_path.push(format!("voxio-recording-{}.wav", uuid::Uuid::new_v4()));
-
     let spec = WavSpec {
         channels: 1,
         sample_rate: recording.sample_rate,
@@ -119,19 +116,22 @@ pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> 
         sample_format: WavSampleFormat::Int,
     };
 
-    let mut writer = WavWriter::create(&wav_path, spec)
-        .map_err(|error| VoxioError::Recording(format!("failed to create wav file: {error}")))?;
-    for sample in &samples {
+    let mut buffer = Cursor::new(Vec::new());
+    {
+        let mut writer = WavWriter::new(&mut buffer, spec)
+            .map_err(|error| VoxioError::Recording(format!("failed to create wav buffer: {error}")))?;
+        for sample in &samples {
+            writer
+                .write_sample(*sample)
+                .map_err(|error| VoxioError::Recording(format!("failed to write wav sample: {error}")))?;
+        }
         writer
-            .write_sample(*sample)
-            .map_err(|error| VoxioError::Recording(format!("failed to write wav sample: {error}")))?;
+            .finalize()
+            .map_err(|error| VoxioError::Recording(format!("failed to finalize wav buffer: {error}")))?;
     }
-    writer
-        .finalize()
-        .map_err(|error| VoxioError::Recording(format!("failed to finalize wav file: {error}")))?;
 
     Ok(RecordingArtifact {
-        wav_path,
+        wav_bytes: buffer.into_inner(),
         sample_count: samples.len(),
     })
 }

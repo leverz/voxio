@@ -52,12 +52,12 @@ impl AsrProvider for NullAsrProvider {
     }
 }
 
-pub fn transcribe_file(audio_path: &Path, settings: &Settings) -> Result<TranscriptionResult> {
-    if let Some(result) = transcribe_with_whisper_server(audio_path, settings)? {
+pub fn transcribe_wav_bytes(wav_bytes: &[u8], settings: &Settings) -> Result<TranscriptionResult> {
+    if let Some(result) = transcribe_with_whisper_server(wav_bytes, settings)? {
         return Ok(result);
     }
 
-    transcribe_with_openai_whisper(audio_path, settings)
+    transcribe_with_openai_whisper(wav_bytes, settings)
 }
 
 fn make_output_dir() -> Result<PathBuf> {
@@ -73,7 +73,7 @@ fn make_output_dir() -> Result<PathBuf> {
 }
 
 fn transcribe_with_whisper_server(
-    audio_path: &Path,
+    wav_bytes: &[u8],
     settings: &Settings,
 ) -> Result<Option<TranscriptionResult>> {
     let whisper_server_bin = std::env::var("VOXIO_WHISPER_SERVER_BIN")
@@ -96,19 +96,17 @@ fn transcribe_with_whisper_server(
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|error| VoxioError::Transcription(format!("failed to build HTTP client: {error}")))?;
+    let audio_part = multipart::Part::bytes(wav_bytes.to_vec())
+        .file_name("voxio-recording.wav")
+        .mime_str("audio/wav")
+        .map_err(|error| VoxioError::Transcription(format!("failed to build audio part: {error}")))?;
     let form = multipart::Form::new()
         .text("response_format", "json")
         .text(
             "language",
             settings.whisper_language().unwrap_or("auto").to_string(),
         )
-        .file("file", audio_path)
-        .map_err(|error| {
-            VoxioError::Transcription(format!(
-                "failed to attach audio file {}: {error}",
-                audio_path.display()
-            ))
-        })?;
+        .part("file", audio_part);
 
     let response = client
         .post(format!("http://127.0.0.1:{port}/inference"))
@@ -133,14 +131,15 @@ fn transcribe_with_whisper_server(
 }
 
 fn transcribe_with_openai_whisper(
-    audio_path: &Path,
+    wav_bytes: &[u8],
     settings: &Settings,
 ) -> Result<TranscriptionResult> {
+    let audio_path = write_temp_wav(wav_bytes)?;
     let whisper_bin = std::env::var("VOXIO_WHISPER_BIN").unwrap_or_else(|_| "whisper".to_string());
     let output_dir = make_output_dir()?;
     let mut command = Command::new(&whisper_bin);
     command
-        .arg(audio_path)
+        .arg(&audio_path)
         .arg("--model")
         .arg(settings.whisper_model())
         .arg("--output_format")
@@ -184,10 +183,23 @@ fn transcribe_with_openai_whisper(
             transcript_path.display()
         ))
     })?;
+    let _ = fs::remove_file(&audio_path);
 
     Ok(TranscriptionResult {
         text: text.trim().to_string(),
     })
+}
+
+fn write_temp_wav(wav_bytes: &[u8]) -> Result<PathBuf> {
+    let mut wav_path = std::env::temp_dir();
+    wav_path.push(format!("voxio-recording-{}.wav", uuid::Uuid::new_v4()));
+    fs::write(&wav_path, wav_bytes).map_err(|error| {
+        VoxioError::Transcription(format!(
+            "failed to write temporary wav file {}: {error}",
+            wav_path.display()
+        ))
+    })?;
+    Ok(wav_path)
 }
 
 fn resolve_whisper_cpp_model(settings: &Settings) -> Option<PathBuf> {
