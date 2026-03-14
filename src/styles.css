@@ -31,7 +31,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -181,7 +182,8 @@ select {
 }
 
 .panel--state,
-.panel--settings {
+.panel--settings,
+.panel--setup {
   grid-column: span 6;
 }
 
@@ -243,6 +245,86 @@ select {
   font-size: 0.92rem;
 }
 
+.setup-progress {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #ddd5cc;
+}
+
+.setup-progress strong {
+  color: #f7f1ea;
+}
+
+.setup-steps {
+  display: grid;
+  gap: 12px;
+}
+
+.setup-step {
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.setup-step[data-ready="true"] {
+  border-color: rgba(95, 224, 161, 0.2);
+  background: rgba(95, 224, 161, 0.07);
+}
+
+.setup-step__header,
+.setup-step__badges {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.setup-step__index {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #cdbfb3;
+}
+
+.setup-step h3 {
+  margin: 8px 0 0;
+  font-size: 1.02rem;
+}
+
+.setup-step p {
+  margin: 12px 0 0;
+  color: #ddd5cc;
+}
+
+.setup-step__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4efe7;
+  font-size: 0.8rem;
+}
+
+.setup-step__command {
+  display: block;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  overflow-x: auto;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f6d9bf;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+  white-space: pre-wrap;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -257,12 +339,14 @@ select {
 }
 
 .form-grid input,
-.form-grid select {
+.form-grid select,
+.form-grid textarea {
   padding: 12px 14px;
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 16px;
   color: #f4efe7;
   background: rgba(255, 255, 255, 0.05);
+  resize: vertical;
 }
 
 .toggle {
@@ -290,7 +374,8 @@ select {
 @media (max-width: 960px) {
   .panel,
   .panel--state,
-  .panel--settings {
+  .panel--settings,
+  .panel--setup {
     grid-column: 1 / -1;
   }
 }

@@ -44,6 +44,20 @@ Whisper model binaries are not tracked in this repository.
 
 Place your local GGML model files under `models/whisper/` or point Voxio at a custom model path with environment variables.
 
+The repository includes a helper script for common model downloads:
+
+```bash
+./scripts/install-whisper-model.sh balanced
+```
+
+Supported presets:
+
+- `fast` -> `ggml-tiny-q5_1.bin`
+- `balanced` -> `ggml-base-q5_1.bin`
+- `small` -> `ggml-small.bin`
+
+The script defaults to `models/whisper/` and will not overwrite an existing file unless you pass `--force`.
+
 ## Environment variables
 
 Optional overrides:
@@ -61,6 +75,7 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 
 ```bash
 npm install
+./scripts/install-whisper-model.sh balanced
 npm run tauri dev
 ```
 
@@ -81,6 +96,16 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 - Secrets, local environment files, generated artifacts, and partial model downloads should not be committed.
 - A license file is not included yet. Choose one before treating the repository as a fully licensed open source project.
+
+## First run
+
+Use this order for the fastest local setup:
+
+1. Grant microphone, accessibility, and input monitoring access.
+2. Install a local backend:
+   `whisper-cli` for Whisper or `npm install -g @marswave/coli` for SenseVoice.
+3. Download a Whisper model with `./scripts/install-whisper-model.sh balanced`.
+4. Open Voxio, keep `Local only + Auto route`, then run a provider test from the setup panel.
 
 ## Contributing
 
