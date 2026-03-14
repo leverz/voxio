@@ -126,11 +126,21 @@ pub fn transcribe_wav_bytes(wav_bytes: &[u8], settings: &Settings) -> Result<Tra
     match settings.transcription_provider {
         TranscriptionProvider::Local => transcribe_with_local_provider(wav_bytes, settings),
         TranscriptionProvider::Cloud => transcribe_with_cloud_provider(wav_bytes, settings),
-        TranscriptionProvider::Auto => {
-            transcribe_with_local_provider(wav_bytes, settings).or_else(|local_error| {
-                transcribe_with_cloud_provider(wav_bytes, settings).map_err(|_| local_error)
-            })
-        }
+        TranscriptionProvider::Auto => match transcribe_with_local_provider(wav_bytes, settings) {
+            Ok(result) => Ok(result),
+            Err(local_error) => transcribe_with_cloud_provider(wav_bytes, settings)
+                .map(|mut result| {
+                    result.route.requested_provider = "Auto fallback".to_string();
+                    result.route.effective_provider = "Cloud".to_string();
+                    result.route.fallback_used = true;
+                    result.route.fallback_reason = Some(format!(
+                        "Local transcription failed, so Auto fallback retried with cloud: {}",
+                        local_error
+                    ));
+                    result
+                })
+                .map_err(|_| local_error),
+        },
     }
 }
 
@@ -439,7 +449,7 @@ fn transcribe_with_cloud_provider(
             text: result.text,
             provider: result.provider,
             route: RouteDecision {
-                requested_provider: "Cloud".to_string(),
+                requested_provider: "Cloud only".to_string(),
                 effective_provider: "Cloud".to_string(),
                 requested_backend: "Cloud".to_string(),
                 actual_backend: "Cloud".to_string(),
@@ -1126,6 +1136,8 @@ fn detect_language_from_text(text: &str, provider_language: Option<&str>) -> Str
 
     if han == 0 && latin == 0 {
         "unknown".to_string()
+    } else if han > 0 && latin <= han * 4 {
+        "zh".to_string()
     } else if han >= latin {
         "zh".to_string()
     } else {
@@ -1273,4 +1285,115 @@ fn server_is_healthy(port: u16) -> bool {
                 .ok()
         })
         .is_some_and(|response| response.status().is_success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CloudModel, InjectionMode, ModelSize, Settings, TranscriptionProvider};
+
+    fn make_settings(language: &str, local_backend: LocalBackend) -> Settings {
+        Settings {
+            hotkey: "Option+Space".to_string(),
+            language: language.to_string(),
+            local_backend,
+            transcription_hint: String::new(),
+            vocabulary_terms: String::new(),
+            auto_punctuation: true,
+            silence_timeout_ms: 1200,
+            injection_mode: InjectionMode::Auto,
+            transcription_provider: TranscriptionProvider::Local,
+            cloud_model: CloudModel::Fast,
+            model: ModelSize::Balanced,
+            launch_at_login: false,
+        }
+    }
+
+    fn backend_status(name: &str, ready: bool) -> BackendStatus {
+        BackendStatus {
+            name: name.to_string(),
+            ready,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn detects_language_from_provider_tag_first() {
+        assert_eq!(detect_language_from_text("hello 世界", Some("<|en|>")), "en");
+        assert_eq!(detect_language_from_text("hello 世界", Some("<|zh|>")), "zh");
+    }
+
+    #[test]
+    fn detects_language_from_text_mix() {
+        assert_eq!(detect_language_from_text("今天 meeting", None), "zh");
+        assert_eq!(detect_language_from_text("hello world", None), "en");
+        assert_eq!(detect_language_from_text("1234", None), "unknown");
+    }
+
+    #[test]
+    fn auto_route_prefers_sensevoice_for_chinese_and_auto() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        assert_eq!(
+            resolve_auto_route_backend(&make_settings("zh", LocalBackend::Auto), &whisper, &sense_voice),
+            Some(LocalBackendKind::SenseVoice)
+        );
+        assert_eq!(
+            resolve_auto_route_backend(&make_settings("auto", LocalBackend::Auto), &whisper, &sense_voice),
+            Some(LocalBackendKind::SenseVoice)
+        );
+    }
+
+    #[test]
+    fn auto_route_prefers_whisper_for_english() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        assert_eq!(
+            resolve_auto_route_backend(&make_settings("en", LocalBackend::Auto), &whisper, &sense_voice),
+            Some(LocalBackendKind::Whisper)
+        );
+    }
+
+    #[test]
+    fn auto_route_skips_unavailable_primary_backend() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", false);
+
+        assert_eq!(
+            resolve_auto_route_backend(&make_settings("zh", LocalBackend::Auto), &whisper, &sense_voice),
+            Some(LocalBackendKind::Whisper)
+        );
+    }
+
+    #[test]
+    fn retry_with_fallback_only_on_mismatch_or_empty_text() {
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "en",
+            "hello world"
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "zh",
+            "今天开会"
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "unknown",
+            ""
+        ));
+
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "zh",
+            "今天开会"
+        ));
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "en",
+            "hello world"
+        ));
+    }
 }

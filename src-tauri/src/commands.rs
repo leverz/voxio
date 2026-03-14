@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     app::{current_snapshot, detect_permissions, emit_state_changed, PermissionStatus},
-    config::{ConfigStore, LocalBackend, Settings},
+    config::{ConfigStore, LocalBackend, Settings, TranscriptionProvider},
     error::{Result, VoxioError},
     modules::{
         asr::{
@@ -125,11 +125,7 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
     match session.state {
         DictationState::Listening => {
             session.state = DictationState::Processing;
-            session.requested_backend = Some(match settings_local_backend(&state) {
-                LocalBackend::Auto => "Auto route".to_string(),
-                LocalBackend::Whisper => "Whisper".to_string(),
-                LocalBackend::SenseVoice => "SenseVoice".to_string(),
-            });
+            session.requested_backend = Some(requested_backend_label(&state));
             let processing_snapshot = session.snapshot();
             let session_id = session.session_id;
             drop(session);
@@ -291,9 +287,24 @@ pub fn cancel_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot
     Ok(snapshot)
 }
 
-fn settings_local_backend(state: &AppState) -> LocalBackend {
+fn requested_backend_label(state: &AppState) -> String {
     let settings = state.settings.lock().expect("settings mutex poisoned");
-    settings.local_backend
+    match settings.transcription_provider {
+        TranscriptionProvider::Cloud => "Cloud".to_string(),
+        TranscriptionProvider::Auto => format!(
+            "Auto fallback ({})",
+            match settings.local_backend {
+                LocalBackend::Auto => "Auto route",
+                LocalBackend::Whisper => "Whisper",
+                LocalBackend::SenseVoice => "SenseVoice",
+            }
+        ),
+        TranscriptionProvider::Local => match settings.local_backend {
+            LocalBackend::Auto => "Auto route".to_string(),
+            LocalBackend::Whisper => "Whisper".to_string(),
+            LocalBackend::SenseVoice => "SenseVoice".to_string(),
+        },
+    }
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {
