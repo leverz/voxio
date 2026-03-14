@@ -24,7 +24,7 @@ Voxio is a desktop voice typing app built with Tauri 2, React, TypeScript, and R
 
 - `src/`: React frontend and settings UI
 - `src-tauri/`: Rust backend, commands, and desktop integrations
-- `models/whisper/`: bundled local Whisper models
+- `models/whisper/`: local Whisper models directory (ignored by Git)
 - `TECHNICAL_SOLUTION.md`: implementation notes and technical plan
 
 ## Transcription backends
@@ -38,14 +38,11 @@ Voxio currently supports:
 
 In local `auto` mode, Voxio routes between Whisper and SenseVoice based on the requested language and the available runtime backend.
 
-## Bundled models
+## Local models
 
-This repository currently includes two GGML Whisper models:
+Whisper model binaries are not tracked in this repository.
 
-- `models/whisper/ggml-tiny-q5_1.bin`
-- `models/whisper/ggml-base-q5_1.bin`
-
-These files are intentionally versioned so the desktop app can run with a predictable local baseline.
+Place your local GGML model files under `models/whisper/` or point Voxio at a custom model path with environment variables.
 
 ## Environment variables
 
