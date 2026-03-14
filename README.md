@@ -1,66 +1,94 @@
 # Voxio
 
-Voxio is an open-source desktop voice typing tool. This repository currently contains the `v0.1` application shell based on `Tauri 2 + React + TypeScript`, with Rust-side state management and placeholder modules for hotkey registration, audio capture, ASR, and text injection.
+Voxio is a desktop voice typing app built with Tauri 2, React, TypeScript, and Rust. It is designed around fast local transcription first, with optional cloud transcription when a local path is unavailable or not preferred.
 
-## Status
+## Current capabilities
 
-What is implemented now:
+- global hotkey driven dictation flow
+- local audio capture and transcription pipeline
+- configurable transcription provider selection
+- local backend selection for Whisper, SenseVoice, or automatic routing
+- clipboard-based text injection
+- persisted local settings
+- runtime readiness checks for transcription backends and permissions
 
-- Desktop app shell and settings UI
-- Dictation state machine skeleton
-- Tauri commands and frontend event bridge
-- Global shortcut registration through the Tauri shortcut plugin
-- Clipboard-based text injection with simulated paste
-- Local config persistence
-- Local audio capture and offline transcription path
+## Roadmap
 
-What is not implemented yet:
+- continuous microphone capture and VAD
+- lower-latency streaming ASR sessions
+- more native text insertion paths
+- richer onboarding and permission guidance
+- packaging and release automation
 
-- Continuous microphone capture and VAD
-- Streaming or persistent low-latency ASR session
-- Accessibility-native text injection
-- Rich native permission requests and onboarding
+## Architecture
 
-## ASR provider order
+- `src/`: React frontend and settings UI
+- `src-tauri/`: Rust backend, commands, and desktop integrations
+- `models/whisper/`: bundled local Whisper models
+- `TECHNICAL_SOLUTION.md`: implementation notes and technical plan
 
-The app currently tries providers in this order:
+## Transcription backends
 
-1. `whisper-cpp` via `/opt/homebrew/bin/whisper-cli`
-2. `openai-whisper` Python CLI as a fallback when no local GGML model is configured
+Voxio currently supports:
 
-The repository currently includes a lightweight local model at:
+- Whisper through `whisper-cli`
+- Whisper through the `openai-whisper` Python CLI as a fallback local path
+- SenseVoice through `coli`
+- OpenAI cloud transcription when `OPENAI_API_KEY` is configured
+
+In local `auto` mode, Voxio routes between Whisper and SenseVoice based on the requested language and the available runtime backend.
+
+## Bundled models
+
+This repository currently includes two GGML Whisper models:
 
 - `models/whisper/ggml-tiny-q5_1.bin`
+- `models/whisper/ggml-base-q5_1.bin`
 
-You can override the `whisper-cpp` paths with:
+These files are intentionally versioned so the desktop app can run with a predictable local baseline.
+
+## Environment variables
+
+Optional overrides:
 
 ```bash
 export VOXIO_WHISPER_CPP_BIN=/custom/path/to/whisper-cli
 export VOXIO_WHISPER_CPP_MODEL=/custom/path/to/ggml-model.bin
+export VOXIO_WHISPER_BIN=/custom/path/to/whisper
+export VOXIO_COLI_BIN=/custom/path/to/coli
+export OPENAI_API_KEY=...
+export OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-## Development
-
-Install dependencies:
+## Getting started
 
 ```bash
 npm install
+npm run tauri dev
 ```
 
-Run the frontend shell:
+If you only need the web UI during development:
 
 ```bash
 npm run dev
 ```
 
-Run the desktop app:
+## Development checks
 
 ```bash
-npm run tauri dev
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-## Environment notes
+## Repository hygiene
 
-The current machine now has `Rust/Cargo` installed and the Rust workspace passes `cargo check`.
+- Secrets, local environment files, generated artifacts, and partial model downloads should not be committed.
+- A license file is not included yet. Choose one before treating the repository as a fully licensed open source project.
 
-The remaining native prerequisite reported by `tauri info` is full `Xcode`, which is still missing on this machine. `Xcode Command Line Tools` are present, but a full desktop app run may still be blocked until `Xcode` is installed.
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development expectations.
+
+## Security
+
+See [SECURITY.md](./SECURITY.md) for reporting guidance.

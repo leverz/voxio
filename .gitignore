@@ -1,6 +1,13 @@
 node_modules
 dist
 .DS_Store
+.idea
+.vscode
+.env
+.env.*
+!.env.example
+*.log
+coverage
 target
 src-tauri/target
 src-tauri/gen
