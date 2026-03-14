@@ -8,7 +8,9 @@ import {
 import { useEffect, useState } from "react";
 import type {
   AppStateSnapshot,
+  BackendStatus,
   PermissionStatus,
+  ProbeTarget,
   ProviderProbeResult,
   RuntimeStatus,
   Settings,
@@ -22,6 +24,11 @@ const DEFAULT_STATE: AppStateSnapshot = {
   lastError: null,
   lastProvider: null,
   lastLatencyMs: null,
+  requestedBackend: null,
+  actualBackend: null,
+  detectedLanguage: null,
+  fallbackUsed: false,
+  fallbackReason: null,
 };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -50,6 +57,22 @@ const DEFAULT_RUNTIME_STATUS: RuntimeStatus = {
   cloudReady: false,
   localBackend: "Unavailable",
   effectiveProvider: "Unavailable",
+  whisper: {
+    name: "Whisper",
+    ready: false,
+    detail: "Unavailable",
+  },
+  senseVoice: {
+    name: "SenseVoice",
+    ready: false,
+    detail: "Unavailable",
+  },
+  cloud: {
+    name: "Cloud",
+    ready: false,
+    detail: "Unavailable",
+  },
+  localStrategy: "Unavailable",
 };
 
 const STATE_LABELS: Record<AppStateSnapshot["state"], string> = {
@@ -71,7 +94,31 @@ function humanizeProviderStatus(
     return `Cloud transcription is active (${settings.cloudModel === "fast" ? "4o mini" : "4o"})`;
   }
 
-  return `${runtimeStatus.localBackend} is active`;
+  return `${runtimeStatus.localBackend} is active. ${runtimeStatus.localStrategy}`;
+}
+
+function describeBackendReadiness(status: BackendStatus): string {
+  return `${status.name}: ${status.ready ? "Ready" : "Unavailable"} - ${status.detail}`;
+}
+
+function humanizeLanguage(language: string | null): string {
+  if (!language) {
+    return "No detection yet";
+  }
+
+  if (language === "zh") {
+    return "Chinese";
+  }
+
+  if (language === "en") {
+    return "English";
+  }
+
+  if (language === "unknown") {
+    return "Unknown";
+  }
+
+  return language;
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -107,6 +154,18 @@ function formatErrorMessage(error: unknown): string {
 
   if (message.includes("Vocabulary must be 500 characters")) {
     return "Vocabulary is too long. Keep it under 500 characters.";
+  }
+
+  if (message.includes("SenseVoice is pinned")) {
+    return "SenseVoice is pinned. Voxio did not switch to Whisper automatically.";
+  }
+
+  if (message.includes("Whisper is pinned")) {
+    return "Whisper is pinned. Voxio did not switch to SenseVoice automatically.";
+  }
+
+  if (message.includes("Install `@marswave/coli`")) {
+    return "SenseVoice is unavailable. Install @marswave/coli to enable it.";
   }
 
   return message;
@@ -264,18 +323,41 @@ export function App() {
     }
   }
 
-  async function handleTestProvider() {
+  async function handleTestProvider(target: ProbeTarget) {
     setIsTestingProvider(true);
     setBanner(null);
 
     try {
-      const result = await invoke<ProviderProbeResult>("test_transcription_provider");
+      const result = await invoke<ProviderProbeResult>("test_transcription_provider", {
+        target,
+      });
       setBanner(result.message);
     } catch (error) {
       setBanner(formatErrorMessage(error));
     } finally {
       setIsTestingProvider(false);
     }
+  }
+
+  function addTranscriptToVocabulary() {
+    const transcript = appState.lastTranscript?.trim();
+    if (!transcript) {
+      return;
+    }
+
+    const nextTerms = new Set(
+      settings.vocabularyTerms
+        .split("\n")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+    nextTerms.add(transcript);
+
+    setSettings((current) => ({
+      ...current,
+      vocabularyTerms: Array.from(nextTerms).join("\n"),
+    }));
+    setBanner("Added the latest transcript to Vocabulary. Save settings to keep it.");
   }
 
   return (
@@ -317,6 +399,11 @@ export function App() {
             Cloud mode needs <strong>OPENAI_API_KEY</strong>.
           </div>
         ) : null}
+        {settings.localBackend === "auto" ? (
+          <div className="hero__hint">
+            Auto route currently targets <strong>{runtimeStatus.localBackend}</strong>.
+          </div>
+        ) : null}
       </section>
 
       <section className="grid">
@@ -341,43 +428,119 @@ export function App() {
               <dd>{appState.lastProvider ?? "No provider yet"}</dd>
             </div>
             <div>
+              <dt>Requested backend</dt>
+              <dd>{appState.requestedBackend ?? "No request yet"}</dd>
+            </div>
+            <div>
+              <dt>Actual backend</dt>
+              <dd>{appState.actualBackend ?? "No backend yet"}</dd>
+            </div>
+            <div>
+              <dt>Detected language</dt>
+              <dd>{humanizeLanguage(appState.detectedLanguage)}</dd>
+            </div>
+            <div>
               <dt>Last latency</dt>
               <dd>{appState.lastLatencyMs ? `${appState.lastLatencyMs} ms` : "No timing yet"}</dd>
+            </div>
+            <div>
+              <dt>Fallback</dt>
+              <dd>{appState.fallbackUsed ? "Used" : "Not used"}</dd>
+            </div>
+            <div>
+              <dt>Fallback reason</dt>
+              <dd>{appState.fallbackReason ?? "No fallback reason"}</dd>
             </div>
             <div>
               <dt>Last error</dt>
               <dd>{appState.lastError ? formatErrorMessage(appState.lastError) : "No errors"}</dd>
             </div>
           </dl>
+          <div className="panel__actions">
+            <button
+              className="button button--ghost"
+              onClick={addTranscriptToVocabulary}
+              disabled={!appState.lastTranscript}
+            >
+              Add transcript to Vocabulary
+            </button>
+          </div>
         </article>
 
         <article className="panel">
           <div className="panel__eyebrow">Transcription</div>
           <h2>Provider readiness</h2>
           <ul className="checklist">
-            <li data-ready={runtimeStatus.localReady}>
-              Local backend: {runtimeStatus.localBackend}
+            <li data-ready={runtimeStatus.whisper.ready}>
+              {describeBackendReadiness(runtimeStatus.whisper)}
             </li>
-            <li data-ready={runtimeStatus.cloudReady}>
-              Cloud backend: {runtimeStatus.cloudReady ? "OPENAI_API_KEY found" : "Missing OPENAI_API_KEY"}
+            <li data-ready={runtimeStatus.senseVoice.ready}>
+              {describeBackendReadiness(runtimeStatus.senseVoice)}
+            </li>
+            <li data-ready={runtimeStatus.cloud.ready}>
+              {describeBackendReadiness(runtimeStatus.cloud)}
             </li>
             <li data-ready={runtimeStatus.effectiveProvider !== "Unavailable"}>
               Effective provider: {runtimeStatus.effectiveProvider}
             </li>
           </ul>
           <p className="panel__note">
-            `Auto fallback` prefers local transcription and uses cloud only when the local path is unavailable.
-            Local `Auto` prefers SenseVoice for Chinese or auto-detect, and Whisper for English.
+            {runtimeStatus.localStrategy}. `Auto fallback` only switches between local and cloud.
           </p>
           <div className="panel__actions">
             <button
               className="button button--ghost"
-              onClick={() => void handleTestProvider()}
+              onClick={() => void handleTestProvider("current")}
               disabled={isTestingProvider}
             >
               {isTestingProvider ? "Testing..." : "Test current provider"}
             </button>
+            <button
+              className="button button--ghost"
+              onClick={() => void handleTestProvider("autoRoute")}
+              disabled={isTestingProvider}
+            >
+              Test Auto route
+            </button>
+            <button
+              className="button button--ghost"
+              onClick={() => void handleTestProvider("senseVoice")}
+              disabled={isTestingProvider}
+            >
+              Test SenseVoice
+            </button>
+            <button
+              className="button button--ghost"
+              onClick={() => void handleTestProvider("whisper")}
+              disabled={isTestingProvider}
+            >
+              Test Whisper
+            </button>
+            <button
+              className="button button--ghost"
+              onClick={() => void handleTestProvider("cloud")}
+              disabled={isTestingProvider}
+            >
+              Test Cloud
+            </button>
           </div>
+        </article>
+
+        <article className="panel">
+          <div className="panel__eyebrow">Quick setup</div>
+          <h2>First-run checklist</h2>
+          <ul className="checklist">
+            <li data-ready={permissions.microphone}>Microphone permission</li>
+            <li data-ready={permissions.accessibility}>Accessibility permission</li>
+            <li data-ready={permissions.inputMonitoring}>Input monitoring</li>
+            <li data-ready={runtimeStatus.senseVoice.ready || runtimeStatus.whisper.ready}>
+              Local transcription backend
+            </li>
+            <li data-ready={runtimeStatus.cloud.ready}>Cloud API key (optional)</li>
+          </ul>
+          <p className="panel__note">
+            Chinese users should prefer SenseVoice or Auto route. Cloud is optional and only needed for cloud transcription.
+          </p>
         </article>
 
         <article className="panel">
@@ -468,6 +631,14 @@ export function App() {
                     vocabularyTerms: event.target.value,
                   }))
                 }
+              />
+            </label>
+            <label className="form-grid__full">
+              Vocabulary template
+              <textarea
+                rows={3}
+                readOnly
+                value={"Voxio\nSenseVoice\nwhisper-cli\nOpenAI\nTauri\n中英混说"}
               />
             </label>
             <label>

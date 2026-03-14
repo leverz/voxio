@@ -63,9 +63,9 @@ thread_local! {
 
 pub fn start_recording() -> Result<RecordingSession> {
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or_else(|| {
-        VoxioError::Recording("no default input device is available".to_string())
-    })?;
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| VoxioError::Recording("no default input device is available".to_string()))?;
     let supported_config = device.default_input_config().map_err(|error| {
         VoxioError::Recording(format!("failed to read input device config: {error}"))
     })?;
@@ -76,9 +76,27 @@ pub fn start_recording() -> Result<RecordingSession> {
     let error_callback = |error| eprintln!("audio stream error: {error}");
 
     let stream = match supported_config.sample_format() {
-        SampleFormat::I16 => build_i16_stream(&device, &stream_config, channels, buffer.clone(), error_callback)?,
-        SampleFormat::U16 => build_u16_stream(&device, &stream_config, channels, buffer.clone(), error_callback)?,
-        SampleFormat::F32 => build_f32_stream(&device, &stream_config, channels, buffer.clone(), error_callback)?,
+        SampleFormat::I16 => build_i16_stream(
+            &device,
+            &stream_config,
+            channels,
+            buffer.clone(),
+            error_callback,
+        )?,
+        SampleFormat::U16 => build_u16_stream(
+            &device,
+            &stream_config,
+            channels,
+            buffer.clone(),
+            error_callback,
+        )?,
+        SampleFormat::F32 => build_f32_stream(
+            &device,
+            &stream_config,
+            channels,
+            buffer.clone(),
+            error_callback,
+        )?,
         sample_format => {
             return Err(VoxioError::Recording(format!(
                 "unsupported sample format: {sample_format:?}"
@@ -126,16 +144,17 @@ pub fn stop_recording(recording: RecordingSession) -> Result<RecordingArtifact> 
 
     let mut buffer = Cursor::new(Vec::new());
     {
-        let mut writer = WavWriter::new(&mut buffer, spec)
-            .map_err(|error| VoxioError::Recording(format!("failed to create wav buffer: {error}")))?;
+        let mut writer = WavWriter::new(&mut buffer, spec).map_err(|error| {
+            VoxioError::Recording(format!("failed to create wav buffer: {error}"))
+        })?;
         for sample in &resampled_samples {
-            writer
-                .write_sample(*sample)
-                .map_err(|error| VoxioError::Recording(format!("failed to write wav sample: {error}")))?;
+            writer.write_sample(*sample).map_err(|error| {
+                VoxioError::Recording(format!("failed to write wav sample: {error}"))
+            })?;
         }
-        writer
-            .finalize()
-            .map_err(|error| VoxioError::Recording(format!("failed to finalize wav buffer: {error}")))?;
+        writer.finalize().map_err(|error| {
+            VoxioError::Recording(format!("failed to finalize wav buffer: {error}"))
+        })?;
     }
 
     Ok(RecordingArtifact {
@@ -239,9 +258,9 @@ fn resample_to_whisper_rate(samples: &[i16], input_sample_rate: u32) -> Vec<i16>
         return samples.to_vec();
     }
 
-    let output_len =
-        ((samples.len() as u64) * (WHISPER_SAMPLE_RATE as u64) / (input_sample_rate as u64))
-            .max(1) as usize;
+    let output_len = ((samples.len() as u64) * (WHISPER_SAMPLE_RATE as u64)
+        / (input_sample_rate as u64))
+        .max(1) as usize;
     let ratio = input_sample_rate as f64 / WHISPER_SAMPLE_RATE as f64;
     let mut output = Vec::with_capacity(output_len);
 

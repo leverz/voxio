@@ -41,12 +41,13 @@ impl TextInjector for ClipboardInjector {
             .map_err(|error| VoxioError::Injection(format!("clipboard unavailable: {error}")))?;
         let previous_text = clipboard.get_text().ok();
 
-        clipboard
-            .set_text(text.to_string())
-            .map_err(|error| VoxioError::Injection(format!("failed to set clipboard text: {error}")))?;
+        clipboard.set_text(text.to_string()).map_err(|error| {
+            VoxioError::Injection(format!("failed to set clipboard text: {error}"))
+        })?;
 
-        let mut enigo = Enigo::new(&Settings::default())
-            .map_err(|error| VoxioError::Injection(format!("failed to initialize keyboard driver: {error}")))?;
+        let mut enigo = Enigo::new(&Settings::default()).map_err(|error| {
+            VoxioError::Injection(format!("failed to initialize keyboard driver: {error}"))
+        })?;
 
         paste_clipboard(&mut enigo)?;
 
@@ -78,9 +79,9 @@ fn paste_clipboard(enigo: &mut Enigo) -> Result<()> {
     enigo
         .key(modifier, Press)
         .map_err(|error| VoxioError::Injection(format!("failed to press modifier: {error}")))?;
-    enigo
-        .key(Key::Unicode('v'), Click)
-        .map_err(|error| VoxioError::Injection(format!("failed to send paste keystroke: {error}")))?;
+    enigo.key(Key::Unicode('v'), Click).map_err(|error| {
+        VoxioError::Injection(format!("failed to send paste keystroke: {error}"))
+    })?;
     enigo
         .key(modifier, Release)
         .map_err(|error| VoxioError::Injection(format!("failed to release modifier: {error}")))?;

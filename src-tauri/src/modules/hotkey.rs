@@ -16,4 +16,3 @@ impl HotkeyManager for NullHotkeyManager {
         Ok(())
     }
 }
-

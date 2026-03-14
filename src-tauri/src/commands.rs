@@ -1,19 +1,15 @@
-use std::{
-    sync::mpsc,
-    thread,
-    time::Instant,
-};
+use std::{sync::mpsc, thread, time::Instant};
 
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
     app::{current_snapshot, detect_permissions, emit_state_changed, PermissionStatus},
-    config::{ConfigStore, Settings},
+    config::{ConfigStore, LocalBackend, Settings},
     error::{Result, VoxioError},
     modules::{
         asr::{
-            prewarm_provider, probe_provider, runtime_status, transcribe_wav_bytes,
+            prewarm_provider, probe_provider, runtime_status, transcribe_wav_bytes, ProbeTarget,
             ProviderProbeResult, RuntimeStatus,
         },
         audio::{
@@ -44,9 +40,12 @@ pub fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus> {
 }
 
 #[tauri::command]
-pub fn test_transcription_provider(state: State<'_, AppState>) -> Result<ProviderProbeResult> {
+pub fn test_transcription_provider(
+    state: State<'_, AppState>,
+    target: Option<ProbeTarget>,
+) -> Result<ProviderProbeResult> {
     let settings = state.settings.lock().expect("settings mutex poisoned");
-    probe_provider(&settings)
+    probe_provider(&settings, target.unwrap_or(ProbeTarget::Current))
 }
 
 #[tauri::command]
@@ -95,6 +94,11 @@ pub fn start_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot>
             session.state = DictationState::Listening;
             session.session_id = Some(Uuid::new_v4());
             session.last_error = None;
+            session.requested_backend = None;
+            session.actual_backend = None;
+            session.detected_language = None;
+            session.fallback_used = false;
+            session.fallback_reason = None;
             let snapshot = session.snapshot();
             let settings = {
                 let settings = state.settings.lock().expect("settings mutex poisoned");
@@ -121,6 +125,11 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
     match session.state {
         DictationState::Listening => {
             session.state = DictationState::Processing;
+            session.requested_backend = Some(match settings_local_backend(&state) {
+                LocalBackend::Auto => "Auto route".to_string(),
+                LocalBackend::Whisper => "Whisper".to_string(),
+                LocalBackend::SenseVoice => "SenseVoice".to_string(),
+            });
             let processing_snapshot = session.snapshot();
             let session_id = session.session_id;
             drop(session);
@@ -135,36 +144,38 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
             let artifact = match stop_recording(recording) {
                 Ok(artifact) => artifact,
                 Err(error) => {
-                    let snapshot = finalize_processing(
-                        &app,
-                        session_id,
-                        Err(error),
-                    );
+                    let snapshot = finalize_processing(&app, session_id, Err(error));
                     return Ok(snapshot);
                 }
             };
 
             let app_handle = app.clone();
             thread::spawn(move || {
-                let result = (|| -> Result<(String, String, u128)> {
-                    let started_at = Instant::now();
-                    let _sample_count = artifact.sample_count;
-                    let transcription = transcribe_wav_bytes(&artifact.wav_bytes, &settings)?;
-                    let transcript = transcription.text.trim().to_string();
-                    if transcript.is_empty() {
-                        return Err(VoxioError::Transcription(
-                            "whisper returned an empty transcript".to_string(),
-                        ));
-                    }
+                let result =
+                    (|| -> Result<(String, String, u128, crate::modules::asr::RouteDecision)> {
+                        let started_at = Instant::now();
+                        let _sample_count = artifact.sample_count;
+                        let transcription = transcribe_wav_bytes(&artifact.wav_bytes, &settings)?;
+                        let transcript = transcription.text.trim().to_string();
+                        if transcript.is_empty() {
+                            return Err(VoxioError::Transcription(
+                                "whisper returned an empty transcript".to_string(),
+                            ));
+                        }
 
-                    inject_transcript(&app_handle, transcript.clone(), settings.injection_mode.clone())?;
+                        inject_transcript(
+                            &app_handle,
+                            transcript.clone(),
+                            settings.injection_mode.clone(),
+                        )?;
 
-                    Ok((
-                        transcript,
-                        transcription.provider,
-                        started_at.elapsed().as_millis(),
-                    ))
-                })();
+                        Ok((
+                            transcript,
+                            transcription.provider,
+                            started_at.elapsed().as_millis(),
+                            transcription.route,
+                        ))
+                    })();
 
                 finalize_processing(&app_handle, session_id, result);
             });
@@ -203,17 +214,19 @@ fn inject_transcript(
 
         let _ = sender.send(result);
     })
-    .map_err(|error| VoxioError::Injection(format!("failed to schedule text injection: {error}")))?;
+    .map_err(|error| {
+        VoxioError::Injection(format!("failed to schedule text injection: {error}"))
+    })?;
 
-    receiver
-        .recv()
-        .map_err(|error| VoxioError::Injection(format!("failed to receive injection result: {error}")))?
+    receiver.recv().map_err(|error| {
+        VoxioError::Injection(format!("failed to receive injection result: {error}"))
+    })?
 }
 
 fn finalize_processing(
     app: &AppHandle,
     session_id: Option<Uuid>,
-    result: Result<(String, String, u128)>,
+    result: Result<(String, String, u128, crate::modules::asr::RouteDecision)>,
 ) -> crate::state::AppStateSnapshot {
     let state = app.state::<AppState>();
     let mut session = state.session.lock().expect("session mutex poisoned");
@@ -225,12 +238,17 @@ fn finalize_processing(
     }
 
     match result {
-        Ok((transcript, provider, latency_ms)) => {
+        Ok((transcript, provider, latency_ms, route)) => {
             session.last_transcript = Some(transcript);
             session.state = DictationState::Idle;
             session.last_error = None;
             session.last_provider = Some(provider);
             session.last_latency_ms = Some(latency_ms);
+            session.requested_backend = Some(route.requested_backend);
+            session.actual_backend = Some(route.actual_backend);
+            session.detected_language = Some(route.detected_language);
+            session.fallback_used = route.fallback_used;
+            session.fallback_reason = route.fallback_reason;
         }
         Err(error) => {
             session.state = DictationState::Error;
@@ -238,6 +256,11 @@ fn finalize_processing(
             session.last_error = Some(error.to_string());
             session.last_provider = None;
             session.last_latency_ms = None;
+            session.requested_backend = None;
+            session.actual_backend = None;
+            session.detected_language = None;
+            session.fallback_used = false;
+            session.fallback_reason = None;
         }
     }
 
@@ -257,10 +280,20 @@ pub fn cancel_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot
     session.last_error = None;
     session.last_provider = None;
     session.last_latency_ms = None;
+    session.requested_backend = None;
+    session.actual_backend = None;
+    session.detected_language = None;
+    session.fallback_used = false;
+    session.fallback_reason = None;
     let snapshot = session.snapshot();
     drop(session);
     emit_state_changed(&app, snapshot.clone());
     Ok(snapshot)
+}
+
+fn settings_local_backend(state: &AppState) -> LocalBackend {
+    let settings = state.settings.lock().expect("settings mutex poisoned");
+    settings.local_backend
 }
 
 fn validate_settings(settings: &Settings) -> Result<()> {

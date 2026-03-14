@@ -14,6 +14,11 @@ pub struct AppStateSnapshot {
     pub last_error: Option<String>,
     pub last_provider: Option<String>,
     pub last_latency_ms: Option<u128>,
+    pub requested_backend: Option<String>,
+    pub actual_backend: Option<String>,
+    pub detected_language: Option<String>,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -33,6 +38,11 @@ pub struct SessionState {
     pub last_error: Option<String>,
     pub last_provider: Option<String>,
     pub last_latency_ms: Option<u128>,
+    pub requested_backend: Option<String>,
+    pub actual_backend: Option<String>,
+    pub detected_language: Option<String>,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
 }
 
 impl Default for SessionState {
@@ -44,6 +54,11 @@ impl Default for SessionState {
             last_error: None,
             last_provider: None,
             last_latency_ms: None,
+            requested_backend: None,
+            actual_backend: None,
+            detected_language: None,
+            fallback_used: false,
+            fallback_reason: None,
         }
     }
 }
@@ -57,6 +72,11 @@ impl SessionState {
             last_error: self.last_error.clone(),
             last_provider: self.last_provider.clone(),
             last_latency_ms: self.last_latency_ms,
+            requested_backend: self.requested_backend.clone(),
+            actual_backend: self.actual_backend.clone(),
+            detected_language: self.detected_language.clone(),
+            fallback_used: self.fallback_used,
+            fallback_reason: self.fallback_reason.clone(),
         }
     }
 }

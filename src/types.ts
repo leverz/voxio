@@ -7,6 +7,11 @@ export interface AppStateSnapshot {
   lastError: string | null;
   lastProvider: string | null;
   lastLatencyMs: number | null;
+  requestedBackend: string | null;
+  actualBackend: string | null;
+  detectedLanguage: string | null;
+  fallbackUsed: boolean;
+  fallbackReason: string | null;
 }
 
 export interface PermissionStatus {
@@ -20,6 +25,10 @@ export interface RuntimeStatus {
   cloudReady: boolean;
   localBackend: string;
   effectiveProvider: string;
+  whisper: BackendStatus;
+  senseVoice: BackendStatus;
+  cloud: BackendStatus;
+  localStrategy: string;
 }
 
 export interface ProviderProbeResult {
@@ -27,6 +36,19 @@ export interface ProviderProbeResult {
   ok: boolean;
   message: string;
 }
+
+export interface BackendStatus {
+  name: string;
+  ready: boolean;
+  detail: string;
+}
+
+export type ProbeTarget =
+  | "current"
+  | "autoRoute"
+  | "whisper"
+  | "senseVoice"
+  | "cloud";
 
 export interface Settings {
   hotkey: string;
