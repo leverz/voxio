@@ -31,7 +31,9 @@ export interface ProviderProbeResult {
 export interface Settings {
   hotkey: string;
   language: string;
+  localBackend: "auto" | "whisper" | "senseVoice";
   transcriptionHint: string;
+  vocabularyTerms: string;
   autoPunctuation: boolean;
   silenceTimeoutMs: number;
   injectionMode: "auto" | "accessibility" | "clipboard";

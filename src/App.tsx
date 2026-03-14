@@ -27,7 +27,9 @@ const DEFAULT_STATE: AppStateSnapshot = {
 const DEFAULT_SETTINGS: Settings = {
   hotkey: "Option+Space",
   language: "auto",
+  localBackend: "auto",
   transcriptionHint: "",
+  vocabularyTerms: "",
   autoPunctuation: true,
   silenceTimeoutMs: 1200,
   injectionMode: "auto",
@@ -101,6 +103,10 @@ function formatErrorMessage(error: unknown): string {
 
   if (message.includes("Prompt hint must be 300 characters")) {
     return "Prompt hint is too long. Keep it under 300 characters.";
+  }
+
+  if (message.includes("Vocabulary must be 500 characters")) {
+    return "Vocabulary is too long. Keep it under 500 characters.";
   }
 
   return message;
@@ -361,6 +367,7 @@ export function App() {
           </ul>
           <p className="panel__note">
             `Auto fallback` prefers local transcription and uses cloud only when the local path is unavailable.
+            Local `Auto` prefers SenseVoice for Chinese or auto-detect, and Whisper for English.
           </p>
           <div className="panel__actions">
             <button
@@ -419,6 +426,22 @@ export function App() {
                 <option value="zh">Chinese</option>
               </select>
             </label>
+            <label>
+              Local engine
+              <select
+                value={settings.localBackend}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    localBackend: event.target.value as Settings["localBackend"],
+                  }))
+                }
+              >
+                <option value="auto">Auto route</option>
+                <option value="senseVoice">SenseVoice</option>
+                <option value="whisper">Whisper</option>
+              </select>
+            </label>
             <label className="form-grid__full">
               Prompt hint
               <textarea
@@ -429,6 +452,20 @@ export function App() {
                   setSettings((current) => ({
                     ...current,
                     transcriptionHint: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="form-grid__full">
+              Vocabulary
+              <textarea
+                rows={4}
+                placeholder={"One term per line.\nVoxio\nwhisper-cli\nTauri\nOpenAI\n李彦宏"}
+                value={settings.vocabularyTerms}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    vocabularyTerms: event.target.value,
                   }))
                 }
               />

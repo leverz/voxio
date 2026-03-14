@@ -282,5 +282,11 @@ fn validate_settings(settings: &Settings) -> Result<()> {
         ));
     }
 
+    if settings.vocabulary_terms.chars().count() > 500 {
+        return Err(VoxioError::Validation(
+            "Vocabulary must be 500 characters or fewer.".to_string(),
+        ));
+    }
+
     Ok(())
 }

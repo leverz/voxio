@@ -11,7 +11,7 @@ use reqwest::blocking::{multipart, Client};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{Settings, TranscriptionProvider},
+    config::{LocalBackend, Settings, TranscriptionProvider},
     error::{Result, VoxioError},
 };
 
@@ -206,21 +206,20 @@ fn probe_cloud_provider(settings: &Settings) -> Result<ProviderProbeResult> {
 }
 
 fn detect_local_backend(settings: &Settings) -> Option<String> {
-    let whisper_cli_bin = std::env::var("VOXIO_WHISPER_CPP_BIN")
-        .unwrap_or_else(|_| "/opt/homebrew/bin/whisper-cli".to_string());
-    if Path::new(&whisper_cli_bin).exists() {
-        if let Some(model_path) = resolve_whisper_cpp_model(settings) {
-            let model_name = model_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("model");
-            return Some(format!("whisper-cli ({model_name})"));
+    for backend in settings.preferred_local_backends() {
+        match backend {
+            LocalBackend::SenseVoice => {
+                if let Some(name) = detect_sensevoice_backend() {
+                    return Some(name);
+                }
+            }
+            LocalBackend::Whisper => {
+                if let Some(name) = detect_whisper_backend(settings) {
+                    return Some(name);
+                }
+            }
+            LocalBackend::Auto => {}
         }
-    }
-
-    let whisper_bin = std::env::var("VOXIO_WHISPER_BIN").unwrap_or_else(|_| "whisper".to_string());
-    if command_is_available(&whisper_bin) {
-        return Some("openai-whisper".to_string());
     }
 
     None
@@ -230,15 +229,56 @@ fn transcribe_with_local_provider(
     wav_bytes: &[u8],
     settings: &Settings,
 ) -> Result<TranscriptionResult> {
+    let preferred_backends = settings.preferred_local_backends();
+    let explicit_backend = !matches!(settings.local_backend, LocalBackend::Auto);
+
+    for backend in preferred_backends {
+        let result = match backend {
+            LocalBackend::SenseVoice => transcribe_with_sensevoice(wav_bytes),
+            LocalBackend::Whisper => transcribe_with_whisper_family(wav_bytes, settings),
+            LocalBackend::Auto => Ok(None),
+        }?;
+
+        if let Some(result) = result {
+            return Ok(result);
+        }
+    }
+
+    if explicit_backend {
+        let message = match settings.local_backend {
+            LocalBackend::SenseVoice => {
+                "SenseVoice is selected, but `coli` is unavailable or failed to transcribe."
+            }
+            LocalBackend::Whisper => {
+                "Whisper is selected, but no local Whisper backend is available."
+            }
+            LocalBackend::Auto => "No local transcription backend is available.",
+        };
+        return Err(VoxioError::Transcription(message.to_string()));
+    }
+
+    Err(VoxioError::Transcription(
+        "No local transcription backend is available.".to_string(),
+    ))
+}
+
+fn transcribe_with_whisper_family(
+    wav_bytes: &[u8],
+    settings: &Settings,
+) -> Result<Option<TranscriptionResult>> {
     if let Some(result) = transcribe_with_whisper_cli(wav_bytes, settings)? {
-        return Ok(result);
+        return Ok(Some(result));
     }
 
     if let Some(result) = transcribe_with_whisper_server(wav_bytes, settings)? {
-        return Ok(result);
+        return Ok(Some(result));
     }
 
-    transcribe_with_openai_whisper(wav_bytes, settings)
+    if detect_python_whisper_backend().is_some() {
+        return transcribe_with_openai_whisper(wav_bytes, settings).map(Some);
+    }
+
+    Ok(None)
 }
 
 fn transcribe_with_cloud_provider(
@@ -298,8 +338,8 @@ fn transcribe_with_whisper_server(
             settings.whisper_language().unwrap_or("auto").to_string(),
         )
         .part("file", audio_part);
-    let form = if let Some(prompt) = settings.transcription_hint() {
-        form.text("prompt", prompt.to_string())
+    let form = if let Some(prompt) = settings.effective_transcription_prompt() {
+        form.text("prompt", prompt)
     } else {
         form
     };
@@ -363,7 +403,7 @@ fn transcribe_with_whisper_cli(
     } else {
         command.arg("-l").arg("auto");
     }
-    if let Some(prompt) = settings.transcription_hint() {
+    if let Some(prompt) = settings.effective_transcription_prompt() {
         command.arg("--prompt").arg(prompt);
     }
 
@@ -421,8 +461,8 @@ fn transcribe_with_openai_api(
     if let Some(language) = settings.whisper_language() {
         form = form.text("language", language.to_string());
     }
-    if let Some(prompt) = settings.transcription_hint() {
-        form = form.text("prompt", prompt.to_string());
+    if let Some(prompt) = settings.effective_transcription_prompt() {
+        form = form.text("prompt", prompt);
     }
 
     let response = client
@@ -446,6 +486,44 @@ fn transcribe_with_openai_api(
     Ok(Some(TranscriptionResult {
         text: payload.text.trim().to_string(),
         provider: settings.openai_transcription_model().to_string(),
+    }))
+}
+
+fn transcribe_with_sensevoice(wav_bytes: &[u8]) -> Result<Option<TranscriptionResult>> {
+    let coli_bin = std::env::var("VOXIO_COLI_BIN").unwrap_or_else(|_| "coli".to_string());
+    if !command_is_available(&coli_bin) {
+        return Ok(None);
+    }
+
+    let audio_path = write_temp_wav(wav_bytes)?;
+    let output = Command::new(&coli_bin)
+        .arg("asr")
+        .arg("-j")
+        .arg("--model")
+        .arg("sensevoice")
+        .arg(&audio_path)
+        .output()
+        .map_err(|error| {
+            VoxioError::Transcription(format!("failed to launch coli `{coli_bin}`: {error}"))
+        })?;
+    let _ = fs::remove_file(&audio_path);
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let payload: ColiAsrResponse = serde_json::from_slice(&output.stdout).map_err(|error| {
+        VoxioError::Transcription(format!("invalid coli ASR response: {error}"))
+    })?;
+    let provider = payload
+        .model
+        .as_deref()
+        .map(|model| format!("coli ({model})"))
+        .unwrap_or_else(|| "coli (sensevoice)".to_string());
+
+    Ok(Some(TranscriptionResult {
+        text: payload.text.trim().to_string(),
+        provider,
     }))
 }
 
@@ -489,7 +567,7 @@ fn transcribe_with_openai_whisper(
     if let Some(language) = settings.whisper_language() {
         command.arg("--language").arg(language);
     }
-    if let Some(prompt) = settings.transcription_hint() {
+    if let Some(prompt) = settings.effective_transcription_prompt() {
         command.arg("--initial_prompt").arg(prompt);
     }
 
@@ -641,6 +719,40 @@ fn command_is_available(command: &str) -> bool {
     })
 }
 
+fn detect_sensevoice_backend() -> Option<String> {
+    let coli_bin = std::env::var("VOXIO_COLI_BIN").unwrap_or_else(|_| "coli".to_string());
+    if command_is_available(&coli_bin) {
+        Some("coli (sensevoice)".to_string())
+    } else {
+        None
+    }
+}
+
+fn detect_whisper_backend(settings: &Settings) -> Option<String> {
+    let whisper_cli_bin = std::env::var("VOXIO_WHISPER_CPP_BIN")
+        .unwrap_or_else(|_| "/opt/homebrew/bin/whisper-cli".to_string());
+    if Path::new(&whisper_cli_bin).exists() {
+        if let Some(model_path) = resolve_whisper_cpp_model(settings) {
+            let model_name = model_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("model");
+            return Some(format!("whisper-cli ({model_name})"));
+        }
+    }
+
+    detect_python_whisper_backend()
+}
+
+fn detect_python_whisper_backend() -> Option<String> {
+    let whisper_bin = std::env::var("VOXIO_WHISPER_BIN").unwrap_or_else(|_| "whisper".to_string());
+    if command_is_available(&whisper_bin) {
+        Some("openai-whisper".to_string())
+    } else {
+        None
+    }
+}
+
 #[derive(Deserialize)]
 struct WhisperServerResponse {
     text: String,
@@ -649,6 +761,12 @@ struct WhisperServerResponse {
 #[derive(Deserialize)]
 struct OpenAiTranscriptionResponse {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct ColiAsrResponse {
+    text: String,
+    model: Option<String>,
 }
 
 struct WhisperServerHandle {

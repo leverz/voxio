@@ -7,10 +7,13 @@ use crate::error::Result;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 pub struct Settings {
     pub hotkey: String,
     pub language: String,
+    pub local_backend: LocalBackend,
     pub transcription_hint: String,
+    pub vocabulary_terms: String,
     pub auto_punctuation: bool,
     pub silence_timeout_ms: u64,
     pub injection_mode: InjectionMode,
@@ -25,7 +28,9 @@ impl Default for Settings {
         Self {
             hotkey: "Option+Space".to_string(),
             language: "auto".to_string(),
+            local_backend: LocalBackend::Auto,
             transcription_hint: String::new(),
+            vocabulary_terms: String::new(),
             auto_punctuation: true,
             silence_timeout_ms: 1200,
             injection_mode: InjectionMode::Auto,
@@ -54,11 +59,46 @@ impl Settings {
         }
     }
 
+    pub fn effective_transcription_prompt(&self) -> Option<String> {
+        let mut sections = Vec::new();
+
+        if let Some(hint) = self.transcription_hint() {
+            sections.push(hint.to_string());
+        }
+
+        let vocabulary = self
+            .vocabulary_terms
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !vocabulary.is_empty() {
+            sections.push(format!("Preferred terms: {}", vocabulary.join(", ")));
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n"))
+        }
+    }
+
     pub fn whisper_model(&self) -> &str {
         match self.model {
             ModelSize::Fast => "tiny",
             ModelSize::Balanced => "base",
             ModelSize::Small => "small",
+        }
+    }
+
+    pub fn preferred_local_backends(&self) -> Vec<LocalBackend> {
+        match self.local_backend {
+            LocalBackend::Auto => match self.language.as_str() {
+                "en" => vec![LocalBackend::Whisper, LocalBackend::SenseVoice],
+                _ => vec![LocalBackend::SenseVoice, LocalBackend::Whisper],
+            },
+            LocalBackend::Whisper => vec![LocalBackend::Whisper],
+            LocalBackend::SenseVoice => vec![LocalBackend::SenseVoice],
         }
     }
 
@@ -102,6 +142,14 @@ pub enum ModelSize {
     Balanced,
     #[serde(alias = "small")]
     Small,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalBackend {
+    Auto,
+    Whisper,
+    SenseVoice,
 }
 
 pub struct ConfigStore {
