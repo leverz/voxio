@@ -8,7 +8,7 @@ use std::{
 };
 
 use reqwest::blocking::{multipart, Client};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{Settings, TranscriptionProvider},
@@ -26,6 +26,24 @@ pub struct AsrConfig {
 #[derive(Debug, Clone)]
 pub struct TranscriptionResult {
     pub text: String,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    pub local_ready: bool,
+    pub cloud_ready: bool,
+    pub local_backend: String,
+    pub effective_provider: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProbeResult {
+    pub provider: String,
+    pub ok: bool,
+    pub message: String,
 }
 
 pub trait AsrProvider {
@@ -48,6 +66,7 @@ impl AsrProvider for NullAsrProvider {
     fn stop(&mut self) -> Result<TranscriptionResult> {
         Ok(TranscriptionResult {
             text: "Speech recognition pipeline is scaffolded but not connected yet.".into(),
+            provider: "none".into(),
         })
     }
 }
@@ -68,6 +87,143 @@ pub fn prewarm_provider(settings: &Settings) {
         return;
     }
     let _ = try_prewarm_provider(settings);
+}
+
+pub fn runtime_status(settings: &Settings) -> RuntimeStatus {
+    let local_backend = detect_local_backend(settings).unwrap_or_else(|| "Unavailable".to_string());
+    let local_ready = local_backend != "Unavailable";
+    let cloud_ready = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    let effective_provider = match settings.transcription_provider {
+        TranscriptionProvider::Local => {
+            if local_ready {
+                "Local".to_string()
+            } else {
+                "Unavailable".to_string()
+            }
+        }
+        TranscriptionProvider::Cloud => {
+            if cloud_ready {
+                "Cloud".to_string()
+            } else {
+                "Unavailable".to_string()
+            }
+        }
+        TranscriptionProvider::Auto => {
+            if local_ready {
+                "Local".to_string()
+            } else if cloud_ready {
+                "Cloud".to_string()
+            } else {
+                "Unavailable".to_string()
+            }
+        }
+    };
+
+    RuntimeStatus {
+        local_ready,
+        cloud_ready,
+        local_backend,
+        effective_provider,
+    }
+}
+
+pub fn probe_provider(settings: &Settings) -> Result<ProviderProbeResult> {
+    match settings.transcription_provider {
+        TranscriptionProvider::Local => probe_local_provider(settings),
+        TranscriptionProvider::Cloud => probe_cloud_provider(settings),
+        TranscriptionProvider::Auto => {
+            let status = runtime_status(settings);
+            if status.effective_provider == "Local" {
+                probe_local_provider(settings)
+            } else if status.effective_provider == "Cloud" {
+                probe_cloud_provider(settings)
+            } else {
+                Ok(ProviderProbeResult {
+                    provider: "Unavailable".to_string(),
+                    ok: false,
+                    message: "No transcription provider is ready.".to_string(),
+                })
+            }
+        }
+    }
+}
+
+fn probe_local_provider(settings: &Settings) -> Result<ProviderProbeResult> {
+    let Some(local_backend) = detect_local_backend(settings) else {
+        return Ok(ProviderProbeResult {
+            provider: "Local".to_string(),
+            ok: false,
+            message: "No local transcription backend is available.".to_string(),
+        });
+    };
+
+    Ok(ProviderProbeResult {
+        provider: "Local".to_string(),
+        ok: true,
+        message: format!("{local_backend} is ready."),
+    })
+}
+
+fn probe_cloud_provider(settings: &Settings) -> Result<ProviderProbeResult> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+        VoxioError::Transcription("cloud transcription is not configured. Set OPENAI_API_KEY to enable it.".to_string())
+    })?;
+    let base_url = std::env::var("OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| VoxioError::Transcription(format!("failed to build HTTP client: {error}")))?;
+    let response = client
+        .get(format!("{base_url}/models"))
+        .bearer_auth(api_key)
+        .send()
+        .map_err(|error| VoxioError::Transcription(format!("OpenAI connectivity check failed: {error}")))?;
+
+    if !response.status().is_success() {
+        return Ok(ProviderProbeResult {
+            provider: "Cloud".to_string(),
+            ok: false,
+            message: format!(
+                "OpenAI connectivity check returned HTTP {}.",
+                response.status()
+            ),
+        });
+    }
+
+    Ok(ProviderProbeResult {
+        provider: "Cloud".to_string(),
+        ok: true,
+        message: format!(
+            "{} is reachable.",
+            settings.openai_transcription_model()
+        ),
+    })
+}
+
+fn detect_local_backend(settings: &Settings) -> Option<String> {
+    let whisper_cli_bin = std::env::var("VOXIO_WHISPER_CPP_BIN")
+        .unwrap_or_else(|_| "/opt/homebrew/bin/whisper-cli".to_string());
+    if Path::new(&whisper_cli_bin).exists() {
+        if let Some(model_path) = resolve_whisper_cpp_model(settings) {
+            let model_name = model_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("model");
+            return Some(format!("whisper-cli ({model_name})"));
+        }
+    }
+
+    let whisper_bin = std::env::var("VOXIO_WHISPER_BIN").unwrap_or_else(|_| "whisper".to_string());
+    if command_is_available(&whisper_bin) {
+        return Some("openai-whisper".to_string());
+    }
+
+    None
 }
 
 fn transcribe_with_local_provider(
@@ -142,6 +298,11 @@ fn transcribe_with_whisper_server(
             settings.whisper_language().unwrap_or("auto").to_string(),
         )
         .part("file", audio_part);
+    let form = if let Some(prompt) = settings.transcription_hint() {
+        form.text("prompt", prompt.to_string())
+    } else {
+        form
+    };
 
     let response = client
         .post(format!("http://127.0.0.1:{}/inference", whisper_server.port))
@@ -163,6 +324,7 @@ fn transcribe_with_whisper_server(
 
     Ok(Some(TranscriptionResult {
         text: payload.text.trim().to_string(),
+        provider: "whisper-server".to_string(),
     }))
 }
 
@@ -201,6 +363,9 @@ fn transcribe_with_whisper_cli(
     } else {
         command.arg("-l").arg("auto");
     }
+    if let Some(prompt) = settings.transcription_hint() {
+        command.arg("--prompt").arg(prompt);
+    }
 
     let output = command.output().map_err(|error| {
         VoxioError::Transcription(format!(
@@ -225,6 +390,7 @@ fn transcribe_with_whisper_cli(
 
     Ok(Some(TranscriptionResult {
         text: text.trim().to_string(),
+        provider: "whisper-cli".to_string(),
     }))
 }
 
@@ -255,6 +421,9 @@ fn transcribe_with_openai_api(
     if let Some(language) = settings.whisper_language() {
         form = form.text("language", language.to_string());
     }
+    if let Some(prompt) = settings.transcription_hint() {
+        form = form.text("prompt", prompt.to_string());
+    }
 
     let response = client
         .post(format!("{base_url}/audio/transcriptions"))
@@ -276,6 +445,7 @@ fn transcribe_with_openai_api(
 
     Ok(Some(TranscriptionResult {
         text: payload.text.trim().to_string(),
+        provider: settings.openai_transcription_model().to_string(),
     }))
 }
 
@@ -319,6 +489,9 @@ fn transcribe_with_openai_whisper(
     if let Some(language) = settings.whisper_language() {
         command.arg("--language").arg(language);
     }
+    if let Some(prompt) = settings.transcription_hint() {
+        command.arg("--initial_prompt").arg(prompt);
+    }
 
     let output = command.output().map_err(|error| {
         VoxioError::Transcription(format!(
@@ -352,6 +525,7 @@ fn transcribe_with_openai_whisper(
 
     Ok(TranscriptionResult {
         text: text.trim().to_string(),
+        provider: "openai-whisper".to_string(),
     })
 }
 
@@ -455,6 +629,16 @@ fn model_file_looks_complete(path: &Path) -> bool {
     };
 
     metadata.len() >= min_size
+}
+
+fn command_is_available(command: &str) -> bool {
+    if Path::new(command).is_absolute() {
+        return Path::new(command).exists();
+    }
+
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|entry| entry.join(command).exists())
+    })
 }
 
 #[derive(Deserialize)]

@@ -12,6 +12,8 @@ pub struct AppStateSnapshot {
     pub session_id: Option<String>,
     pub last_transcript: Option<String>,
     pub last_error: Option<String>,
+    pub last_provider: Option<String>,
+    pub last_latency_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,6 +31,8 @@ pub struct SessionState {
     pub session_id: Option<Uuid>,
     pub last_transcript: Option<String>,
     pub last_error: Option<String>,
+    pub last_provider: Option<String>,
+    pub last_latency_ms: Option<u128>,
 }
 
 impl Default for SessionState {
@@ -38,6 +42,8 @@ impl Default for SessionState {
             session_id: None,
             last_transcript: None,
             last_error: None,
+            last_provider: None,
+            last_latency_ms: None,
         }
     }
 }
@@ -49,6 +55,8 @@ impl SessionState {
             session_id: self.session_id.map(|value| value.to_string()),
             last_transcript: self.last_transcript.clone(),
             last_error: self.last_error.clone(),
+            last_provider: self.last_provider.clone(),
+            last_latency_ms: self.last_latency_ms,
         }
     }
 }

@@ -10,6 +10,7 @@ use crate::error::Result;
 pub struct Settings {
     pub hotkey: String,
     pub language: String,
+    pub transcription_hint: String,
     pub auto_punctuation: bool,
     pub silence_timeout_ms: u64,
     pub injection_mode: InjectionMode,
@@ -24,6 +25,7 @@ impl Default for Settings {
         Self {
             hotkey: "Option+Space".to_string(),
             language: "auto".to_string(),
+            transcription_hint: String::new(),
             auto_punctuation: true,
             silence_timeout_ms: 1200,
             injection_mode: InjectionMode::Auto,
@@ -40,6 +42,15 @@ impl Settings {
         match self.language.as_str() {
             "auto" => None,
             value => Some(value),
+        }
+    }
+
+    pub fn transcription_hint(&self) -> Option<&str> {
+        let value = self.transcription_hint.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
         }
     }
 

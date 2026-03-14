@@ -5,6 +5,8 @@ export interface AppStateSnapshot {
   sessionId: string | null;
   lastTranscript: string | null;
   lastError: string | null;
+  lastProvider: string | null;
+  lastLatencyMs: number | null;
 }
 
 export interface PermissionStatus {
@@ -13,9 +15,23 @@ export interface PermissionStatus {
   inputMonitoring: boolean;
 }
 
+export interface RuntimeStatus {
+  localReady: boolean;
+  cloudReady: boolean;
+  localBackend: string;
+  effectiveProvider: string;
+}
+
+export interface ProviderProbeResult {
+  provider: string;
+  ok: boolean;
+  message: string;
+}
+
 export interface Settings {
   hotkey: string;
   language: string;
+  transcriptionHint: string;
   autoPunctuation: boolean;
   silenceTimeoutMs: number;
   injectionMode: "auto" | "accessibility" | "clipboard";

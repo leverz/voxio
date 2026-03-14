@@ -18,10 +18,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::cancel_dictation,
             commands::get_app_state,
+            commands::get_runtime_status,
             commands::get_settings,
             commands::request_permissions,
             commands::start_dictation,
             commands::stop_dictation,
+            commands::test_transcription_provider,
             commands::toggle_dictation,
             commands::update_settings,
         ])

@@ -9,6 +9,8 @@ import { useEffect, useState } from "react";
 import type {
   AppStateSnapshot,
   PermissionStatus,
+  ProviderProbeResult,
+  RuntimeStatus,
   Settings,
   StateChangedEvent,
 } from "./types";
@@ -18,11 +20,14 @@ const DEFAULT_STATE: AppStateSnapshot = {
   sessionId: null,
   lastTranscript: null,
   lastError: null,
+  lastProvider: null,
+  lastLatencyMs: null,
 };
 
 const DEFAULT_SETTINGS: Settings = {
   hotkey: "Option+Space",
   language: "auto",
+  transcriptionHint: "",
   autoPunctuation: true,
   silenceTimeoutMs: 1200,
   injectionMode: "auto",
@@ -38,6 +43,13 @@ const DEFAULT_PERMISSIONS: PermissionStatus = {
   inputMonitoring: false,
 };
 
+const DEFAULT_RUNTIME_STATUS: RuntimeStatus = {
+  localReady: false,
+  cloudReady: false,
+  localBackend: "Unavailable",
+  effectiveProvider: "Unavailable",
+};
+
 const STATE_LABELS: Record<AppStateSnapshot["state"], string> = {
   idle: "Idle",
   listening: "Listening...",
@@ -45,12 +57,64 @@ const STATE_LABELS: Record<AppStateSnapshot["state"], string> = {
   error: "Needs attention",
 };
 
+function humanizeProviderStatus(
+  settings: Settings,
+  runtimeStatus: RuntimeStatus,
+): string {
+  if (runtimeStatus.effectiveProvider === "Unavailable") {
+    return "No provider is ready";
+  }
+
+  if (runtimeStatus.effectiveProvider === "Cloud") {
+    return `Cloud transcription is active (${settings.cloudModel === "fast" ? "4o mini" : "4o"})`;
+  }
+
+  return `${runtimeStatus.localBackend} is active`;
+}
+
+function formatErrorMessage(error: unknown): string {
+  const message = String(error).trim();
+
+  if (message.includes("OPENAI_API_KEY")) {
+    return "Cloud transcription is enabled, but OPENAI_API_KEY is missing.";
+  }
+
+  if (message.includes("no default input device")) {
+    return "No microphone was found. Check your input device settings.";
+  }
+
+  if (message.includes("no audio samples were captured")) {
+    return "No speech was captured. Check microphone permission and try again.";
+  }
+
+  if (message.includes("whisper returned an empty transcript")) {
+    return "Speech was heard, but nothing usable was transcribed. Try speaking more clearly or switch providers.";
+  }
+
+  if (message.includes("input injection failed")) {
+    return "Text was transcribed, but Voxio could not paste it into the target app.";
+  }
+
+  if (message.includes("No active dictation session")) {
+    return "There is no active dictation session to stop.";
+  }
+
+  if (message.includes("Prompt hint must be 300 characters")) {
+    return "Prompt hint is too long. Keep it under 300 characters.";
+  }
+
+  return message;
+}
+
 export function App() {
   const [appState, setAppState] = useState<AppStateSnapshot>(DEFAULT_STATE);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [permissions, setPermissions] =
     useState<PermissionStatus>(DEFAULT_PERMISSIONS);
+  const [runtimeStatus, setRuntimeStatus] =
+    useState<RuntimeStatus>(DEFAULT_RUNTIME_STATUS);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTestingProvider, setIsTestingProvider] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
 
   useEffect(() => {
@@ -58,10 +122,11 @@ export function App() {
     let unlisten: UnlistenFn | null = null;
 
     async function bootstrap() {
-      const [stateSnapshot, appSettings, permissionStatus] = await Promise.all([
+      const [stateSnapshot, appSettings, permissionStatus, currentRuntimeStatus] = await Promise.all([
         invoke<AppStateSnapshot>("get_app_state"),
         invoke<Settings>("get_settings"),
         invoke<PermissionStatus>("request_permissions"),
+        invoke<RuntimeStatus>("get_runtime_status"),
       ]);
 
       if (!mounted) {
@@ -71,6 +136,7 @@ export function App() {
       setAppState(stateSnapshot);
       setSettings(appSettings);
       setPermissions(permissionStatus);
+      setRuntimeStatus(currentRuntimeStatus);
 
       unlisten = await listen<StateChangedEvent>(
         "voxio://state-changed",
@@ -150,11 +216,13 @@ export function App() {
       const stored = await invoke<Settings>("update_settings", {
         payload: nextSettings,
       });
+      const currentRuntimeStatus = await invoke<RuntimeStatus>("get_runtime_status");
 
       setSettings(stored);
-      setBanner(null);
+      setRuntimeStatus(currentRuntimeStatus);
+      setBanner(`Settings saved. ${humanizeProviderStatus(stored, currentRuntimeStatus)}.`);
     } catch (error) {
-      setBanner(`Failed to save settings: ${String(error)}`);
+      setBanner(`Failed to save settings: ${formatErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
     }
@@ -177,7 +245,7 @@ export function App() {
       const snapshot = await invoke<AppStateSnapshot>("cancel_dictation");
       setAppState(snapshot);
     } catch (error) {
-      setBanner(String(error));
+      setBanner(formatErrorMessage(error));
     }
   }
 
@@ -186,7 +254,21 @@ export function App() {
       const snapshot = await invoke<AppStateSnapshot>("cancel_dictation");
       setAppState(snapshot);
     } catch (error) {
-      setBanner(String(error));
+      setBanner(formatErrorMessage(error));
+    }
+  }
+
+  async function handleTestProvider() {
+    setIsTestingProvider(true);
+    setBanner(null);
+
+    try {
+      const result = await invoke<ProviderProbeResult>("test_transcription_provider");
+      setBanner(result.message);
+    } catch (error) {
+      setBanner(formatErrorMessage(error));
+    } finally {
+      setIsTestingProvider(false);
     }
   }
 
@@ -222,8 +304,13 @@ export function App() {
           Current shortcut <strong>{settings.hotkey}</strong>
         </div>
         <div className="hero__hint hero__hint--warning">
-          Current build records audio and attempts local Whisper transcription.
+          {humanizeProviderStatus(settings, runtimeStatus)}
         </div>
+        {settings.transcriptionProvider !== "local" && !runtimeStatus.cloudReady ? (
+          <div className="hero__hint hero__hint--warning">
+            Cloud mode needs <strong>OPENAI_API_KEY</strong>.
+          </div>
+        ) : null}
       </section>
 
       <section className="grid">
@@ -244,10 +331,46 @@ export function App() {
               <dd>{appState.lastTranscript ?? "No transcript yet"}</dd>
             </div>
             <div>
+              <dt>Last provider</dt>
+              <dd>{appState.lastProvider ?? "No provider yet"}</dd>
+            </div>
+            <div>
+              <dt>Last latency</dt>
+              <dd>{appState.lastLatencyMs ? `${appState.lastLatencyMs} ms` : "No timing yet"}</dd>
+            </div>
+            <div>
               <dt>Last error</dt>
-              <dd>{appState.lastError ?? "No errors"}</dd>
+              <dd>{appState.lastError ? formatErrorMessage(appState.lastError) : "No errors"}</dd>
             </div>
           </dl>
+        </article>
+
+        <article className="panel">
+          <div className="panel__eyebrow">Transcription</div>
+          <h2>Provider readiness</h2>
+          <ul className="checklist">
+            <li data-ready={runtimeStatus.localReady}>
+              Local backend: {runtimeStatus.localBackend}
+            </li>
+            <li data-ready={runtimeStatus.cloudReady}>
+              Cloud backend: {runtimeStatus.cloudReady ? "OPENAI_API_KEY found" : "Missing OPENAI_API_KEY"}
+            </li>
+            <li data-ready={runtimeStatus.effectiveProvider !== "Unavailable"}>
+              Effective provider: {runtimeStatus.effectiveProvider}
+            </li>
+          </ul>
+          <p className="panel__note">
+            `Auto fallback` prefers local transcription and uses cloud only when the local path is unavailable.
+          </p>
+          <div className="panel__actions">
+            <button
+              className="button button--ghost"
+              onClick={() => void handleTestProvider()}
+              disabled={isTestingProvider}
+            >
+              {isTestingProvider ? "Testing..." : "Test current provider"}
+            </button>
+          </div>
         </article>
 
         <article className="panel">
@@ -295,6 +418,20 @@ export function App() {
                 <option value="en">English</option>
                 <option value="zh">Chinese</option>
               </select>
+            </label>
+            <label className="form-grid__full">
+              Prompt hint
+              <textarea
+                rows={3}
+                placeholder="Add names, product terms, or expected context. Example: Voxio, Tauri, whisper-cli, OpenAI, 中文 mixed with English."
+                value={settings.transcriptionHint}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    transcriptionHint: event.target.value,
+                  }))
+                }
+              />
             </label>
             <label>
               Silence timeout (ms)

@@ -1,6 +1,7 @@
 use std::{
     sync::mpsc,
     thread,
+    time::Instant,
 };
 
 use tauri::{AppHandle, Manager, State};
@@ -11,7 +12,10 @@ use crate::{
     config::{ConfigStore, Settings},
     error::{Result, VoxioError},
     modules::{
-        asr::{prewarm_provider, transcribe_wav_bytes},
+        asr::{
+            prewarm_provider, probe_provider, runtime_status, transcribe_wav_bytes,
+            ProviderProbeResult, RuntimeStatus,
+        },
         audio::{
             clear_active_recording, start_recording, stop_recording, store_active_recording,
             take_active_recording,
@@ -31,6 +35,18 @@ pub fn get_app_state(state: State<'_, AppState>) -> Result<crate::state::AppStat
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
     let settings = state.settings.lock().expect("settings mutex poisoned");
     Ok(settings.clone())
+}
+
+#[tauri::command]
+pub fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus> {
+    let settings = state.settings.lock().expect("settings mutex poisoned");
+    Ok(runtime_status(&settings))
+}
+
+#[tauri::command]
+pub fn test_transcription_provider(state: State<'_, AppState>) -> Result<ProviderProbeResult> {
+    let settings = state.settings.lock().expect("settings mutex poisoned");
+    probe_provider(&settings)
 }
 
 #[tauri::command]
@@ -130,7 +146,8 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
 
             let app_handle = app.clone();
             thread::spawn(move || {
-                let result = (|| -> Result<String> {
+                let result = (|| -> Result<(String, String, u128)> {
+                    let started_at = Instant::now();
                     let _sample_count = artifact.sample_count;
                     let transcription = transcribe_wav_bytes(&artifact.wav_bytes, &settings)?;
                     let transcript = transcription.text.trim().to_string();
@@ -142,7 +159,11 @@ pub fn stop_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot> 
 
                     inject_transcript(&app_handle, transcript.clone(), settings.injection_mode.clone())?;
 
-                    Ok(transcript)
+                    Ok((
+                        transcript,
+                        transcription.provider,
+                        started_at.elapsed().as_millis(),
+                    ))
                 })();
 
                 finalize_processing(&app_handle, session_id, result);
@@ -192,7 +213,7 @@ fn inject_transcript(
 fn finalize_processing(
     app: &AppHandle,
     session_id: Option<Uuid>,
-    result: Result<String>,
+    result: Result<(String, String, u128)>,
 ) -> crate::state::AppStateSnapshot {
     let state = app.state::<AppState>();
     let mut session = state.session.lock().expect("session mutex poisoned");
@@ -204,15 +225,19 @@ fn finalize_processing(
     }
 
     match result {
-        Ok(transcript) => {
+        Ok((transcript, provider, latency_ms)) => {
             session.last_transcript = Some(transcript);
             session.state = DictationState::Idle;
             session.last_error = None;
+            session.last_provider = Some(provider);
+            session.last_latency_ms = Some(latency_ms);
         }
         Err(error) => {
             session.state = DictationState::Error;
             session.last_transcript = None;
             session.last_error = Some(error.to_string());
+            session.last_provider = None;
+            session.last_latency_ms = None;
         }
     }
 
@@ -230,6 +255,8 @@ pub fn cancel_dictation(app: AppHandle) -> Result<crate::state::AppStateSnapshot
     session.state = DictationState::Idle;
     session.session_id = None;
     session.last_error = None;
+    session.last_provider = None;
+    session.last_latency_ms = None;
     let snapshot = session.snapshot();
     drop(session);
     emit_state_changed(&app, snapshot.clone());
@@ -246,6 +273,12 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     if !(500..=5000).contains(&settings.silence_timeout_ms) {
         return Err(VoxioError::Validation(
             "Silence timeout must be between 500 and 5000 ms.".to_string(),
+        ));
+    }
+
+    if settings.transcription_hint.chars().count() > 300 {
+        return Err(VoxioError::Validation(
+            "Prompt hint must be 300 characters or fewer.".to_string(),
         ));
     }
 
