@@ -118,6 +118,10 @@ function humanizeLanguage(language: string | null): string {
     return "Unknown";
   }
 
+  if (language === "mixed") {
+    return "Mixed Chinese and English";
+  }
+
   return language;
 }
 
