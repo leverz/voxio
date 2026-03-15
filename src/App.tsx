@@ -17,6 +17,15 @@ import type {
   StateChangedEvent,
 } from "./types";
 
+interface SetupStep {
+  key: string;
+  title: string;
+  ready: boolean;
+  required: boolean;
+  detail: string;
+  command?: string;
+}
+
 const DEFAULT_STATE: AppStateSnapshot = {
   state: "idle",
   sessionId: null,
@@ -171,6 +180,96 @@ function formatErrorMessage(error: unknown): string {
   return message;
 }
 
+function missingPermissions(permissions: PermissionStatus): string[] {
+  const missing: string[] = [];
+
+  if (!permissions.microphone) {
+    missing.push("Microphone");
+  }
+
+  if (!permissions.accessibility) {
+    missing.push("Accessibility");
+  }
+
+  if (!permissions.inputMonitoring) {
+    missing.push("Input Monitoring");
+  }
+
+  return missing;
+}
+
+function recommendedModelInstallCommand(settings: Settings): string {
+  switch (settings.model) {
+    case "fast":
+      return "./scripts/install-whisper-model.sh fast";
+    case "small":
+      return "./scripts/install-whisper-model.sh small";
+    default:
+      return "./scripts/install-whisper-model.sh balanced";
+  }
+}
+
+function buildSetupSteps(
+  settings: Settings,
+  permissions: PermissionStatus,
+  runtimeStatus: RuntimeStatus,
+): SetupStep[] {
+  const missing = missingPermissions(permissions);
+  const localBackendReady =
+    runtimeStatus.senseVoice.ready || runtimeStatus.whisper.ready;
+
+  return [
+    {
+      key: "permissions",
+      title: "Grant desktop permissions",
+      ready: missing.length === 0,
+      required: true,
+      detail:
+        missing.length === 0
+          ? "Microphone, accessibility, and input monitoring are all available."
+          : `Still missing: ${missing.join(", ")}. Approve them in macOS Settings before expecting stable dictation and text insertion.`,
+    },
+    {
+      key: "local-backend",
+      title: "Install at least one local backend",
+      ready: localBackendReady,
+      required: true,
+      detail: localBackendReady
+        ? runtimeStatus.senseVoice.ready && runtimeStatus.whisper.ready
+          ? "SenseVoice and Whisper are both available."
+          : runtimeStatus.senseVoice.ready
+            ? "SenseVoice is available. Whisper remains optional."
+            : "Whisper is available. SenseVoice remains optional."
+        : "Neither local backend is ready. Install `coli` for SenseVoice, or install Whisper CLI plus a local model for Whisper.",
+      command: localBackendReady ? undefined : "npm install -g @marswave/coli",
+    },
+    {
+      key: "whisper-model",
+      title: "Install a Whisper model",
+      ready: runtimeStatus.whisper.ready,
+      required: false,
+      detail: runtimeStatus.whisper.ready
+        ? runtimeStatus.whisper.detail
+        : "Voxio expects local Whisper models under `models/whisper/`. Use the helper script to fetch a matching model for the current quality setting.",
+      command: runtimeStatus.whisper.ready
+        ? undefined
+        : recommendedModelInstallCommand(settings),
+    },
+    {
+      key: "cloud",
+      title: "Configure optional cloud fallback",
+      ready: runtimeStatus.cloud.ready,
+      required: false,
+      detail: runtimeStatus.cloud.ready
+        ? runtimeStatus.cloud.detail
+        : "Cloud transcription is optional. Configure `OPENAI_API_KEY` only if you want Cloud mode or Local+Cloud fallback.",
+      command: runtimeStatus.cloud.ready
+        ? undefined
+        : "export OPENAI_API_KEY=your_key_here",
+    },
+  ];
+}
+
 export function App() {
   const [appState, setAppState] = useState<AppStateSnapshot>(DEFAULT_STATE);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -180,6 +279,7 @@ export function App() {
     useState<RuntimeStatus>(DEFAULT_RUNTIME_STATUS);
   const [isSaving, setIsSaving] = useState(false);
   const [isTestingProvider, setIsTestingProvider] = useState(false);
+  const [isRefreshingReadiness, setIsRefreshingReadiness] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
 
   useEffect(() => {
@@ -293,6 +393,28 @@ export function App() {
     }
   }
 
+  async function refreshReadiness(showBanner = true) {
+    setIsRefreshingReadiness(true);
+
+    try {
+      const [permissionStatus, currentRuntimeStatus] = await Promise.all([
+        invoke<PermissionStatus>("request_permissions"),
+        invoke<RuntimeStatus>("get_runtime_status"),
+      ]);
+      setPermissions(permissionStatus);
+      setRuntimeStatus(currentRuntimeStatus);
+      if (showBanner) {
+        setBanner(
+          `Refreshed setup checks. ${humanizeProviderStatus(settings, currentRuntimeStatus)}.`,
+        );
+      }
+    } catch (error) {
+      setBanner(`Failed to refresh setup checks: ${formatErrorMessage(error)}`);
+    } finally {
+      setIsRefreshingReadiness(false);
+    }
+  }
+
   async function handlePrimaryAction() {
     try {
       if (appState.state === "idle" || appState.state === "error") {
@@ -359,6 +481,22 @@ export function App() {
     }));
     setBanner("Added the latest transcript to Vocabulary. Save settings to keep it.");
   }
+
+  function applyRecommendedLocalPreset() {
+    setSettings((current) => ({
+      ...current,
+      transcriptionProvider: "local",
+      localBackend: "auto",
+      language: "auto",
+      model: "balanced",
+      injectionMode: "auto",
+    }));
+    setBanner("Applied the recommended local preset. Save settings to keep it.");
+  }
+
+  const setupSteps = buildSetupSteps(settings, permissions, runtimeStatus);
+  const requiredSetupDone = setupSteps.filter((step) => step.required && step.ready).length;
+  const requiredSetupTotal = setupSteps.filter((step) => step.required).length;
 
   return (
     <main className="shell">
@@ -526,20 +664,62 @@ export function App() {
           </div>
         </article>
 
-        <article className="panel">
+        <article className="panel panel--setup">
           <div className="panel__eyebrow">Quick setup</div>
-          <h2>First-run checklist</h2>
-          <ul className="checklist">
-            <li data-ready={permissions.microphone}>Microphone permission</li>
-            <li data-ready={permissions.accessibility}>Accessibility permission</li>
-            <li data-ready={permissions.inputMonitoring}>Input monitoring</li>
-            <li data-ready={runtimeStatus.senseVoice.ready || runtimeStatus.whisper.ready}>
-              Local transcription backend
-            </li>
-            <li data-ready={runtimeStatus.cloud.ready}>Cloud API key (optional)</li>
-          </ul>
+          <h2>First-run guide</h2>
+          <div className="setup-progress">
+            <strong>
+              Required steps: {requiredSetupDone}/{requiredSetupTotal}
+            </strong>
+            <span>
+              Start with permissions and one local backend. Cloud remains optional.
+            </span>
+          </div>
+          <div className="setup-steps">
+            {setupSteps.map((step, index) => (
+              <section
+                key={step.key}
+                className="setup-step"
+                data-ready={step.ready}
+              >
+                <div className="setup-step__header">
+                  <div>
+                    <div className="setup-step__index">Step {index + 1}</div>
+                    <h3>{step.title}</h3>
+                  </div>
+                  <div className="setup-step__badges">
+                    <span className="setup-step__badge">
+                      {step.required ? "Required" : "Optional"}
+                    </span>
+                    <span className="setup-step__badge">
+                      {step.ready ? "Ready" : "Pending"}
+                    </span>
+                  </div>
+                </div>
+                <p>{step.detail}</p>
+                {step.command ? (
+                  <code className="setup-step__command">{step.command}</code>
+                ) : null}
+              </section>
+            ))}
+          </div>
+          <div className="panel__actions">
+            <button
+              className="button button--primary"
+              onClick={applyRecommendedLocalPreset}
+            >
+              Use recommended local preset
+            </button>
+            <button
+              className="button button--ghost"
+              onClick={() => void refreshReadiness()}
+              disabled={isRefreshingReadiness}
+            >
+              {isRefreshingReadiness ? "Refreshing..." : "Refresh setup checks"}
+            </button>
+          </div>
           <p className="panel__note">
-            Chinese users should prefer SenseVoice or Auto route. Cloud is optional and only needed for cloud transcription.
+            The Whisper helper script stores models in `models/whisper/`. Chinese-first usage should prefer SenseVoice or Auto route.
           </p>
         </article>
 
