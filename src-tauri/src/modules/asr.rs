@@ -1274,3 +1274,199 @@ fn server_is_healthy(port: u16) -> bool {
         })
         .is_some_and(|response| response.status().is_success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend_status(name: &str, ready: bool) -> BackendStatus {
+        BackendStatus {
+            name: name.to_string(),
+            ready,
+            detail: String::new(),
+        }
+    }
+
+    fn settings_with(language: &str, local_backend: LocalBackend) -> Settings {
+        let mut settings = Settings::default();
+        settings.language = language.to_string();
+        settings.local_backend = local_backend;
+        settings
+    }
+
+    #[test]
+    fn auto_route_prefers_whisper_for_english() {
+        let settings = settings_with("en", LocalBackend::Auto);
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        let selected = resolve_auto_route_backend(&settings, &whisper, &sense_voice);
+
+        assert_eq!(selected, Some(LocalBackendKind::Whisper));
+    }
+
+    #[test]
+    fn auto_route_prefers_sensevoice_for_auto_detect_and_chinese() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        assert_eq!(
+            resolve_auto_route_backend(
+                &settings_with("auto", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            Some(LocalBackendKind::SenseVoice)
+        );
+        assert_eq!(
+            resolve_auto_route_backend(
+                &settings_with("zh", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            Some(LocalBackendKind::SenseVoice)
+        );
+    }
+
+    #[test]
+    fn auto_route_falls_back_to_other_ready_backend() {
+        let settings = settings_with("en", LocalBackend::Auto);
+        let whisper = backend_status("Whisper", false);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        let selected = resolve_auto_route_backend(&settings, &whisper, &sense_voice);
+
+        assert_eq!(selected, Some(LocalBackendKind::SenseVoice));
+    }
+
+    #[test]
+    fn fallback_backend_requires_alternate_ready_backend() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+        let unavailable = backend_status("SenseVoice", false);
+
+        assert_eq!(
+            fallback_backend(LocalBackendKind::Whisper, &whisper, &sense_voice),
+            Some(LocalBackendKind::SenseVoice)
+        );
+        assert_eq!(
+            fallback_backend(LocalBackendKind::SenseVoice, &whisper, &sense_voice),
+            Some(LocalBackendKind::Whisper)
+        );
+        assert_eq!(
+            fallback_backend(LocalBackendKind::Whisper, &whisper, &unavailable),
+            None
+        );
+    }
+
+    #[test]
+    fn fallback_retry_triggers_on_short_or_language_mismatched_results() {
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "en",
+            ""
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "zh",
+            "你好世界"
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "en",
+            "hello world"
+        ));
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "en",
+            "hello world"
+        ));
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "zh",
+            "你好世界"
+        ));
+    }
+
+    #[test]
+    fn language_detection_prefers_provider_tag_and_normalizes_common_forms() {
+        assert_eq!(detect_language_from_text("hello", Some("<|zh|>")), "zh");
+        assert_eq!(detect_language_from_text("你好", Some("en-US")), "en");
+        assert_eq!(normalize_language_tag("zh-CN"), "zh");
+        assert_eq!(normalize_language_tag("en-us"), "en");
+        assert_eq!(normalize_language_tag("fr"), "auto");
+    }
+
+    #[test]
+    fn language_detection_falls_back_to_text_character_mix() {
+        assert_eq!(detect_language_from_text("你好世界", None), "zh");
+        assert_eq!(detect_language_from_text("hello world", None), "en");
+        assert_eq!(detect_language_from_text("你好 hello", None), "en");
+        assert_eq!(detect_language_from_text("中文内容测试 hi", None), "zh");
+        assert_eq!(detect_language_from_text("12345 !?", None), "unknown");
+    }
+
+    #[test]
+    fn current_backend_label_reflects_pinned_and_auto_modes() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+        let unavailable = backend_status("Whisper", false);
+
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("en", LocalBackend::Whisper),
+                &whisper,
+                &sense_voice
+            ),
+            "Whisper"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("zh", LocalBackend::SenseVoice),
+                &whisper,
+                &sense_voice
+            ),
+            "SenseVoice"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("en", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            "Whisper"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("auto", LocalBackend::Auto),
+                &unavailable,
+                &backend_status("SenseVoice", false)
+            ),
+            "Unavailable"
+        );
+    }
+
+    #[test]
+    fn local_strategy_describes_pinned_and_auto_modes() {
+        assert_eq!(
+            describe_local_strategy(&settings_with("en", LocalBackend::Whisper)),
+            "Pinned: Whisper only"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("zh", LocalBackend::SenseVoice)),
+            "Pinned: SenseVoice only"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("en", LocalBackend::Auto)),
+            "Auto route: English -> Whisper first"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("zh", LocalBackend::Auto)),
+            "Auto route: Chinese -> SenseVoice first"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("auto", LocalBackend::Auto)),
+            "Auto route: Auto-detect prefers SenseVoice first, then Whisper"
+        );
+    }
+}
