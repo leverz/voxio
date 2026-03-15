@@ -71,7 +71,7 @@ pub struct ProviderProbeResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProbeTarget {
     Current,
@@ -148,56 +148,12 @@ pub fn runtime_status(settings: &Settings) -> RuntimeStatus {
     let whisper = whisper_backend_status(settings);
     let sense_voice = sensevoice_backend_status();
     let cloud = cloud_backend_status(settings);
-    let local_ready = whisper.ready || sense_voice.ready;
-
-    let effective_provider = match settings.transcription_provider {
-        TranscriptionProvider::Local => {
-            if local_ready {
-                "Local".to_string()
-            } else {
-                "Unavailable".to_string()
-            }
-        }
-        TranscriptionProvider::Cloud => {
-            if cloud.ready {
-                "Cloud".to_string()
-            } else {
-                "Unavailable".to_string()
-            }
-        }
-        TranscriptionProvider::Auto => {
-            if local_ready {
-                "Local".to_string()
-            } else if cloud.ready {
-                "Cloud".to_string()
-            } else {
-                "Unavailable".to_string()
-            }
-        }
-    };
-
-    let local_backend = current_local_backend_label(settings, &whisper, &sense_voice);
-    let local_strategy = describe_local_strategy(settings);
-
-    RuntimeStatus {
-        local_ready,
-        cloud_ready: cloud.ready,
-        local_backend,
-        effective_provider,
-        whisper,
-        sense_voice,
-        cloud,
-        local_strategy,
-    }
+    build_runtime_status(settings, whisper, sense_voice, cloud)
 }
 
 pub fn probe_provider(settings: &Settings, target: ProbeTarget) -> Result<ProviderProbeResult> {
     match target {
-        ProbeTarget::Current => match settings.transcription_provider {
-            TranscriptionProvider::Local => probe_local_provider(settings),
-            TranscriptionProvider::Cloud => probe_cloud_provider(settings),
-            TranscriptionProvider::Auto => probe_auto_route(settings),
-        },
+        ProbeTarget::Current => probe_provider(settings, current_probe_target(settings)),
         ProbeTarget::AutoRoute => probe_auto_route(settings),
         ProbeTarget::Whisper => probe_whisper_provider(settings),
         ProbeTarget::SenseVoice => probe_sensevoice_provider(),
@@ -205,27 +161,10 @@ pub fn probe_provider(settings: &Settings, target: ProbeTarget) -> Result<Provid
     }
 }
 
-fn probe_local_provider(settings: &Settings) -> Result<ProviderProbeResult> {
-    match settings.local_backend {
-        LocalBackend::Whisper => probe_whisper_provider(settings),
-        LocalBackend::SenseVoice => probe_sensevoice_provider(),
-        LocalBackend::Auto => probe_auto_route(settings),
-    }
-}
-
 fn probe_auto_route(settings: &Settings) -> Result<ProviderProbeResult> {
     let whisper = whisper_backend_status(settings);
     let sense_voice = sensevoice_backend_status();
-    let strategy = describe_local_strategy(settings);
-    let backend = resolve_auto_route_backend(settings, &whisper, &sense_voice)
-        .map(|backend| backend.label())
-        .unwrap_or("Unavailable");
-
-    Ok(ProviderProbeResult {
-        provider: "Auto route".to_string(),
-        ok: backend != "Unavailable",
-        message: format!("{strategy}. Current route target: {backend}."),
-    })
+    Ok(auto_route_probe_result(settings, &whisper, &sense_voice))
 }
 
 fn probe_whisper_provider(settings: &Settings) -> Result<ProviderProbeResult> {
@@ -1027,6 +966,95 @@ fn detect_python_whisper_backend() -> BackendStatus {
     }
 }
 
+fn build_runtime_status(
+    settings: &Settings,
+    whisper: BackendStatus,
+    sense_voice: BackendStatus,
+    cloud: BackendStatus,
+) -> RuntimeStatus {
+    let local_ready = whisper.ready || sense_voice.ready;
+    let effective_provider = effective_provider_label(
+        settings.transcription_provider.clone(),
+        local_ready,
+        cloud.ready,
+    )
+    .to_string();
+    let local_backend = current_local_backend_label(settings, &whisper, &sense_voice);
+    let local_strategy = describe_local_strategy(settings);
+
+    RuntimeStatus {
+        local_ready,
+        cloud_ready: cloud.ready,
+        local_backend,
+        effective_provider,
+        whisper,
+        sense_voice,
+        cloud,
+        local_strategy,
+    }
+}
+
+fn effective_provider_label(
+    transcription_provider: TranscriptionProvider,
+    local_ready: bool,
+    cloud_ready: bool,
+) -> &'static str {
+    match transcription_provider {
+        TranscriptionProvider::Local => {
+            if local_ready {
+                "Local"
+            } else {
+                "Unavailable"
+            }
+        }
+        TranscriptionProvider::Cloud => {
+            if cloud_ready {
+                "Cloud"
+            } else {
+                "Unavailable"
+            }
+        }
+        TranscriptionProvider::Auto => {
+            if local_ready {
+                "Local"
+            } else if cloud_ready {
+                "Cloud"
+            } else {
+                "Unavailable"
+            }
+        }
+    }
+}
+
+fn current_probe_target(settings: &Settings) -> ProbeTarget {
+    match settings.transcription_provider {
+        TranscriptionProvider::Local => match settings.local_backend {
+            LocalBackend::Auto => ProbeTarget::AutoRoute,
+            LocalBackend::Whisper => ProbeTarget::Whisper,
+            LocalBackend::SenseVoice => ProbeTarget::SenseVoice,
+        },
+        TranscriptionProvider::Cloud => ProbeTarget::Cloud,
+        TranscriptionProvider::Auto => ProbeTarget::AutoRoute,
+    }
+}
+
+fn auto_route_probe_result(
+    settings: &Settings,
+    whisper: &BackendStatus,
+    sense_voice: &BackendStatus,
+) -> ProviderProbeResult {
+    let strategy = describe_local_strategy(settings);
+    let backend = resolve_auto_route_backend(settings, whisper, sense_voice)
+        .map(|backend| backend.label())
+        .unwrap_or("Unavailable");
+
+    ProviderProbeResult {
+        provider: "Auto route".to_string(),
+        ok: backend != "Unavailable",
+        message: format!("{strategy}. Current route target: {backend}."),
+    }
+}
+
 fn requested_backend_label(backend: LocalBackend) -> &'static str {
     match backend {
         LocalBackend::Auto => "Auto route",
@@ -1273,4 +1301,290 @@ fn server_is_healthy(port: u16) -> bool {
                 .ok()
         })
         .is_some_and(|response| response.status().is_success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend_status(name: &str, ready: bool) -> BackendStatus {
+        BackendStatus {
+            name: name.to_string(),
+            ready,
+            detail: String::new(),
+        }
+    }
+
+    fn settings_with(language: &str, local_backend: LocalBackend) -> Settings {
+        let mut settings = Settings::default();
+        settings.language = language.to_string();
+        settings.local_backend = local_backend;
+        settings
+    }
+
+    #[test]
+    fn auto_route_prefers_whisper_for_english() {
+        let settings = settings_with("en", LocalBackend::Auto);
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        let selected = resolve_auto_route_backend(&settings, &whisper, &sense_voice);
+
+        assert_eq!(selected, Some(LocalBackendKind::Whisper));
+    }
+
+    #[test]
+    fn auto_route_prefers_sensevoice_for_auto_detect_and_chinese() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        assert_eq!(
+            resolve_auto_route_backend(
+                &settings_with("auto", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            Some(LocalBackendKind::SenseVoice)
+        );
+        assert_eq!(
+            resolve_auto_route_backend(
+                &settings_with("zh", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            Some(LocalBackendKind::SenseVoice)
+        );
+    }
+
+    #[test]
+    fn auto_route_falls_back_to_other_ready_backend() {
+        let settings = settings_with("en", LocalBackend::Auto);
+        let whisper = backend_status("Whisper", false);
+        let sense_voice = backend_status("SenseVoice", true);
+
+        let selected = resolve_auto_route_backend(&settings, &whisper, &sense_voice);
+
+        assert_eq!(selected, Some(LocalBackendKind::SenseVoice));
+    }
+
+    #[test]
+    fn effective_provider_label_matches_provider_readiness_rules() {
+        assert_eq!(
+            effective_provider_label(TranscriptionProvider::Local, true, false),
+            "Local"
+        );
+        assert_eq!(
+            effective_provider_label(TranscriptionProvider::Local, false, true),
+            "Unavailable"
+        );
+        assert_eq!(
+            effective_provider_label(TranscriptionProvider::Cloud, false, true),
+            "Cloud"
+        );
+        assert_eq!(
+            effective_provider_label(TranscriptionProvider::Auto, false, true),
+            "Cloud"
+        );
+        assert_eq!(
+            effective_provider_label(TranscriptionProvider::Auto, false, false),
+            "Unavailable"
+        );
+    }
+
+    #[test]
+    fn current_probe_target_reflects_active_provider_configuration() {
+        let mut local_auto = settings_with("auto", LocalBackend::Auto);
+        local_auto.transcription_provider = TranscriptionProvider::Local;
+
+        let mut local_whisper = settings_with("en", LocalBackend::Whisper);
+        local_whisper.transcription_provider = TranscriptionProvider::Local;
+
+        let mut local_sense_voice = settings_with("zh", LocalBackend::SenseVoice);
+        local_sense_voice.transcription_provider = TranscriptionProvider::Local;
+
+        let mut cloud = settings_with("auto", LocalBackend::Auto);
+        cloud.transcription_provider = TranscriptionProvider::Cloud;
+
+        let mut auto = settings_with("auto", LocalBackend::Auto);
+        auto.transcription_provider = TranscriptionProvider::Auto;
+
+        assert_eq!(current_probe_target(&local_auto), ProbeTarget::AutoRoute);
+        assert_eq!(current_probe_target(&local_whisper), ProbeTarget::Whisper);
+        assert_eq!(
+            current_probe_target(&local_sense_voice),
+            ProbeTarget::SenseVoice
+        );
+        assert_eq!(current_probe_target(&cloud), ProbeTarget::Cloud);
+        assert_eq!(current_probe_target(&auto), ProbeTarget::AutoRoute);
+    }
+
+    #[test]
+    fn fallback_backend_requires_alternate_ready_backend() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+        let unavailable = backend_status("SenseVoice", false);
+
+        assert_eq!(
+            fallback_backend(LocalBackendKind::Whisper, &whisper, &sense_voice),
+            Some(LocalBackendKind::SenseVoice)
+        );
+        assert_eq!(
+            fallback_backend(LocalBackendKind::SenseVoice, &whisper, &sense_voice),
+            Some(LocalBackendKind::Whisper)
+        );
+        assert_eq!(
+            fallback_backend(LocalBackendKind::Whisper, &whisper, &unavailable),
+            None
+        );
+    }
+
+    #[test]
+    fn fallback_retry_triggers_on_short_or_language_mismatched_results() {
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "en",
+            ""
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "zh",
+            "你好世界"
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "en",
+            "hello world"
+        ));
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "en",
+            "hello world"
+        ));
+        assert!(!should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "zh",
+            "你好世界"
+        ));
+    }
+
+    #[test]
+    fn language_detection_prefers_provider_tag_and_normalizes_common_forms() {
+        assert_eq!(detect_language_from_text("hello", Some("<|zh|>")), "zh");
+        assert_eq!(detect_language_from_text("你好", Some("en-US")), "en");
+        assert_eq!(normalize_language_tag("zh-CN"), "zh");
+        assert_eq!(normalize_language_tag("en-us"), "en");
+        assert_eq!(normalize_language_tag("fr"), "auto");
+    }
+
+    #[test]
+    fn language_detection_falls_back_to_text_character_mix() {
+        assert_eq!(detect_language_from_text("你好世界", None), "zh");
+        assert_eq!(detect_language_from_text("hello world", None), "en");
+        assert_eq!(detect_language_from_text("你好 hello", None), "en");
+        assert_eq!(detect_language_from_text("中文内容测试 hi", None), "zh");
+        assert_eq!(detect_language_from_text("12345 !?", None), "unknown");
+    }
+
+    #[test]
+    fn current_backend_label_reflects_pinned_and_auto_modes() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", true);
+        let unavailable = backend_status("Whisper", false);
+
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("en", LocalBackend::Whisper),
+                &whisper,
+                &sense_voice
+            ),
+            "Whisper"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("zh", LocalBackend::SenseVoice),
+                &whisper,
+                &sense_voice
+            ),
+            "SenseVoice"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("en", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            "Whisper"
+        );
+        assert_eq!(
+            current_local_backend_label(
+                &settings_with("auto", LocalBackend::Auto),
+                &unavailable,
+                &backend_status("SenseVoice", false)
+            ),
+            "Unavailable"
+        );
+    }
+
+    #[test]
+    fn runtime_status_uses_supplied_backend_statuses() {
+        let mut settings = settings_with("en", LocalBackend::Auto);
+        settings.transcription_provider = TranscriptionProvider::Auto;
+
+        let status = build_runtime_status(
+            &settings,
+            backend_status("Whisper", false),
+            backend_status("SenseVoice", true),
+            backend_status("Cloud", true),
+        );
+
+        assert!(status.local_ready);
+        assert!(status.cloud_ready);
+        assert_eq!(status.local_backend, "SenseVoice");
+        assert_eq!(status.effective_provider, "Local");
+        assert_eq!(
+            status.local_strategy,
+            "Auto route: English -> Whisper first"
+        );
+    }
+
+    #[test]
+    fn auto_route_probe_result_reports_selected_backend_and_strategy() {
+        let settings = settings_with("en", LocalBackend::Auto);
+        let result = auto_route_probe_result(
+            &settings,
+            &backend_status("Whisper", true),
+            &backend_status("SenseVoice", true),
+        );
+
+        assert_eq!(result.provider, "Auto route");
+        assert!(result.ok);
+        assert_eq!(
+            result.message,
+            "Auto route: English -> Whisper first. Current route target: Whisper."
+        );
+    }
+
+    #[test]
+    fn local_strategy_describes_pinned_and_auto_modes() {
+        assert_eq!(
+            describe_local_strategy(&settings_with("en", LocalBackend::Whisper)),
+            "Pinned: Whisper only"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("zh", LocalBackend::SenseVoice)),
+            "Pinned: SenseVoice only"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("en", LocalBackend::Auto)),
+            "Auto route: English -> Whisper first"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("zh", LocalBackend::Auto)),
+            "Auto route: Chinese -> SenseVoice first"
+        );
+        assert_eq!(
+            describe_local_strategy(&settings_with("auto", LocalBackend::Auto)),
+            "Auto route: Auto-detect prefers SenseVoice first, then Whisper"
+        );
+    }
 }
