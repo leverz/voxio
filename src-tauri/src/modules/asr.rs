@@ -126,11 +126,21 @@ pub fn transcribe_wav_bytes(wav_bytes: &[u8], settings: &Settings) -> Result<Tra
     match settings.transcription_provider {
         TranscriptionProvider::Local => transcribe_with_local_provider(wav_bytes, settings),
         TranscriptionProvider::Cloud => transcribe_with_cloud_provider(wav_bytes, settings),
-        TranscriptionProvider::Auto => {
-            transcribe_with_local_provider(wav_bytes, settings).or_else(|local_error| {
-                transcribe_with_cloud_provider(wav_bytes, settings).map_err(|_| local_error)
-            })
-        }
+        TranscriptionProvider::Auto => match transcribe_with_local_provider(wav_bytes, settings) {
+            Ok(result) => Ok(result),
+            Err(local_error) => transcribe_with_cloud_provider(wav_bytes, settings)
+                .map(|mut result| {
+                    result.route.requested_provider = "Auto fallback".to_string();
+                    result.route.effective_provider = "Cloud".to_string();
+                    result.route.fallback_used = true;
+                    result.route.fallback_reason = Some(format!(
+                        "Local transcription failed, so Auto fallback retried with cloud: {}",
+                        local_error
+                    ));
+                    result
+                })
+                .map_err(|_| local_error),
+        },
     }
 }
 
@@ -281,66 +291,62 @@ fn transcribe_with_local_provider(
     let fallback = primary.and_then(|backend| fallback_backend(backend, &whisper, &sense_voice));
 
     if let Some(primary_backend) = primary {
-        let primary_result = match primary_backend {
-            LocalBackendKind::SenseVoice => transcribe_with_sensevoice(wav_bytes)?.map(|result| {
-                let language =
-                    detect_language_from_text(&result.text, result.detected_language.as_deref());
-                (result, language)
-            }),
-            LocalBackendKind::Whisper => {
-                transcribe_with_whisper_family(wav_bytes, settings)?.map(|result| {
-                    let language = detect_language_from_text(&result.text, None);
-                    (result, language)
-                })
-            }
-        };
+        let primary_result = run_backend(primary_backend, wav_bytes, settings)?;
 
-        if let Some((result, language)) = primary_result {
+        if let Some(primary_result) = primary_result {
             route.actual_backend = primary_backend.label().to_string();
-            route.detected_language = language.clone();
+            route.detected_language = primary_result.language.clone();
 
-            if should_retry_with_fallback(primary_backend, &language, &result.text) {
+            if should_retry_with_fallback(
+                primary_backend,
+                &primary_result.language,
+                &primary_result.transcription.text,
+            ) {
                 if let Some(fallback_backend) = fallback {
-                    if let Some((fallback_result, fallback_language)) =
-                        run_fallback_backend(fallback_backend, wav_bytes, settings)?
-                    {
-                        route.actual_backend = fallback_backend.label().to_string();
-                        route.detected_language = fallback_language;
-                        route.fallback_used = true;
-                        route.fallback_reason = Some(
-                            match primary_backend {
-                                LocalBackendKind::SenseVoice => {
-                                    "SenseVoice result looked English-heavy; retried with Whisper."
-                                }
-                                LocalBackendKind::Whisper => {
-                                    "Whisper result looked Chinese-heavy; retried with SenseVoice."
-                                }
-                            }
-                            .to_string(),
+                    if let Some(fallback_result) = run_backend(fallback_backend, wav_bytes, settings)? {
+                        let use_fallback = should_prefer_fallback_result(
+                            &primary_result,
+                            &fallback_result,
                         );
 
-                        return Ok(TranscriptionResult {
-                            text: fallback_result.text,
-                            provider: fallback_result.provider,
-                            route,
-                        });
+                        if use_fallback {
+                            route.actual_backend = fallback_backend.label().to_string();
+                            route.detected_language = fallback_result.language;
+                            route.fallback_used = true;
+                            route.fallback_reason = Some(fallback_reason_for_quality_choice(
+                                primary_backend,
+                                fallback_backend,
+                                true,
+                            ));
+
+                            return Ok(TranscriptionResult {
+                                text: fallback_result.transcription.text,
+                                provider: fallback_result.transcription.provider,
+                                route,
+                            });
+                        }
+
+                        route.fallback_used = true;
+                        route.fallback_reason = Some(fallback_reason_for_quality_choice(
+                            primary_backend,
+                            fallback_backend,
+                            false,
+                        ));
                     }
                 }
             }
 
             return Ok(TranscriptionResult {
-                text: result.text,
-                provider: result.provider,
+                text: primary_result.transcription.text,
+                provider: primary_result.transcription.provider,
                 route,
             });
         }
 
         if let Some(fallback_backend) = fallback {
-            if let Some((fallback_result, fallback_language)) =
-                run_fallback_backend(fallback_backend, wav_bytes, settings)?
-            {
+            if let Some(fallback_result) = run_backend(fallback_backend, wav_bytes, settings)? {
                 route.actual_backend = fallback_backend.label().to_string();
-                route.detected_language = fallback_language;
+                route.detected_language = fallback_result.language;
                 route.fallback_used = true;
                 route.fallback_reason = Some(format!(
                     "{} was unavailable or failed, so Auto route retried with {}.",
@@ -349,8 +355,8 @@ fn transcribe_with_local_provider(
                 ));
 
                 return Ok(TranscriptionResult {
-                    text: fallback_result.text,
-                    provider: fallback_result.provider,
+                    text: fallback_result.transcription.text,
+                    provider: fallback_result.transcription.provider,
                     route,
                 });
             }
@@ -378,7 +384,7 @@ fn transcribe_with_cloud_provider(
             text: result.text,
             provider: result.provider,
             route: RouteDecision {
-                requested_provider: "Cloud".to_string(),
+                requested_provider: "Cloud only".to_string(),
                 effective_provider: "Cloud".to_string(),
                 requested_backend: "Cloud".to_string(),
                 actual_backend: "Cloud".to_string(),
@@ -1108,29 +1114,116 @@ fn should_retry_with_fallback(
         return true;
     }
 
+    if detected_language == "mixed" {
+        return transcription_quality(text) < 0.45;
+    }
+
     match primary {
         LocalBackendKind::SenseVoice => detected_language == "en",
         LocalBackendKind::Whisper => detected_language == "zh",
     }
 }
 
-fn run_fallback_backend(
+fn transcription_quality(text: &str) -> f32 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0.0;
+    }
+
+    let char_count = trimmed.chars().count();
+    let token_count = trimmed.split_whitespace().count();
+    let mut han = 0usize;
+    let mut latin = 0usize;
+    let mut alnum = 0usize;
+    let mut punctuation = 0usize;
+
+    for character in trimmed.chars() {
+        if ('\u{4E00}'..='\u{9FFF}').contains(&character) {
+            han += 1;
+            alnum += 1;
+        } else if character.is_ascii_alphabetic() {
+            latin += 1;
+            alnum += 1;
+        } else if character.is_ascii_digit() {
+            alnum += 1;
+        } else if character.is_ascii_punctuation() || character.is_ascii_whitespace() {
+            punctuation += 1;
+        }
+    }
+
+    let script_bonus = if han > 0 && latin > 0 {
+        0.35
+    } else if han > 0 || latin > 0 {
+        0.2
+    } else {
+        0.0
+    };
+
+    let density = (alnum as f32 / char_count as f32).min(1.0) * 0.35;
+    let length_bonus = ((char_count.min(24) as f32) / 24.0) * 0.2;
+    let token_bonus = ((token_count.min(6) as f32) / 6.0) * 0.1;
+    let punctuation_penalty = if punctuation > alnum { 0.15 } else { 0.0 };
+    let short_mixed_penalty = if han > 0 && latin > 0 && char_count < 6 {
+        0.3
+    } else {
+        0.0
+    };
+
+    (script_bonus + density + length_bonus + token_bonus - punctuation_penalty - short_mixed_penalty)
+        .clamp(0.0, 1.0)
+}
+
+fn run_backend(
     backend: LocalBackendKind,
     wav_bytes: &[u8],
     settings: &Settings,
-) -> Result<Option<(BackendTranscription, String)>> {
+) -> Result<Option<BackendCandidate>> {
     match backend {
         LocalBackendKind::SenseVoice => Ok(transcribe_with_sensevoice(wav_bytes)?.map(|result| {
             let language =
                 detect_language_from_text(&result.text, result.detected_language.as_deref());
-            (result, language)
+            BackendCandidate::new(result, language)
         })),
-        LocalBackendKind::Whisper => Ok(transcribe_with_whisper_family(wav_bytes, settings)?.map(
-            |result| {
+        LocalBackendKind::Whisper => {
+            Ok(transcribe_with_whisper_family(wav_bytes, settings)?.map(|result| {
                 let language = detect_language_from_text(&result.text, None);
-                (result, language)
-            },
-        )),
+                BackendCandidate::new(result, language)
+            }))
+        }
+    }
+}
+
+fn should_prefer_fallback_result(primary: &BackendCandidate, fallback: &BackendCandidate) -> bool {
+    let score_gap = fallback.quality - primary.quality;
+
+    if primary.language == "mixed" && fallback.language == "mixed" {
+        return score_gap > 0.08;
+    }
+
+    if primary.language == "mixed" || fallback.language == "mixed" {
+        return score_gap > 0.03;
+    }
+
+    score_gap > 0.12
+}
+
+fn fallback_reason_for_quality_choice(
+    primary: LocalBackendKind,
+    fallback: LocalBackendKind,
+    selected_fallback: bool,
+) -> String {
+    if selected_fallback {
+        format!(
+            "{} result looked weaker, so Auto route kept {} instead.",
+            primary.label(),
+            fallback.label()
+        )
+    } else {
+        format!(
+            "Auto route compared {} and {}, but kept the original result.",
+            primary.label(),
+            fallback.label()
+        )
     }
 }
 
@@ -1154,6 +1247,22 @@ fn detect_language_from_text(text: &str, provider_language: Option<&str>) -> Str
 
     if han == 0 && latin == 0 {
         "unknown".to_string()
+    } else if han > 0 && latin > 0 {
+        let ratio = if han > latin {
+            han as f32 / latin as f32
+        } else {
+            latin as f32 / han as f32
+        };
+
+        if ratio <= 4.0 {
+            "mixed".to_string()
+        } else if han > latin {
+            "zh".to_string()
+        } else {
+            "en".to_string()
+        }
+    } else if han > 0 && latin <= han * 4 {
+        "zh".to_string()
     } else if han >= latin {
         "zh".to_string()
     } else {
@@ -1165,6 +1274,7 @@ fn normalize_language_tag(language: &str) -> &str {
     match language {
         "<|zh|>" | "zh" | "zh-cn" | "zh-CN" => "zh",
         "<|en|>" | "en" | "en-us" | "en-US" => "en",
+        "<|yue|>" | "yue" => "zh",
         _ => "auto",
     }
 }
@@ -1191,6 +1301,24 @@ struct BackendTranscription {
     text: String,
     provider: String,
     detected_language: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct BackendCandidate {
+    transcription: BackendTranscription,
+    language: String,
+    quality: f32,
+}
+
+impl BackendCandidate {
+    fn new(transcription: BackendTranscription, language: String) -> Self {
+        let quality = transcription_quality(&transcription.text);
+        Self {
+            transcription,
+            language,
+            quality,
+        }
+    }
 }
 
 struct WhisperServerHandle {
@@ -1368,6 +1496,21 @@ mod tests {
     }
 
     #[test]
+    fn auto_route_skips_unavailable_primary_backend() {
+        let whisper = backend_status("Whisper", true);
+        let sense_voice = backend_status("SenseVoice", false);
+
+        assert_eq!(
+            resolve_auto_route_backend(
+                &settings_with("zh", LocalBackend::Auto),
+                &whisper,
+                &sense_voice
+            ),
+            Some(LocalBackendKind::Whisper)
+        );
+    }
+
+    #[test]
     fn effective_provider_label_matches_provider_readiness_rules() {
         assert_eq!(
             effective_provider_label(TranscriptionProvider::Local, true, false),
@@ -1456,20 +1599,32 @@ mod tests {
             "hello world"
         ));
         assert!(!should_retry_with_fallback(
+            LocalBackendKind::SenseVoice,
+            "zh",
+            "你好世界"
+        ));
+        assert!(!should_retry_with_fallback(
             LocalBackendKind::Whisper,
             "en",
             "hello world"
         ));
         assert!(!should_retry_with_fallback(
-            LocalBackendKind::SenseVoice,
-            "zh",
-            "你好世界"
+            LocalBackendKind::Whisper,
+            "mixed",
+            "今天 meeting in Shanghai"
+        ));
+        assert!(should_retry_with_fallback(
+            LocalBackendKind::Whisper,
+            "mixed",
+            "a 今"
         ));
     }
 
     #[test]
     fn language_detection_prefers_provider_tag_and_normalizes_common_forms() {
         assert_eq!(detect_language_from_text("hello", Some("<|zh|>")), "zh");
+        assert_eq!(detect_language_from_text("hello 世界", Some("<|en|>")), "en");
+        assert_eq!(detect_language_from_text("hello 世界", Some("<|zh|>")), "zh");
         assert_eq!(detect_language_from_text("你好", Some("en-US")), "en");
         assert_eq!(normalize_language_tag("zh-CN"), "zh");
         assert_eq!(normalize_language_tag("en-us"), "en");
@@ -1480,8 +1635,10 @@ mod tests {
     fn language_detection_falls_back_to_text_character_mix() {
         assert_eq!(detect_language_from_text("你好世界", None), "zh");
         assert_eq!(detect_language_from_text("hello world", None), "en");
-        assert_eq!(detect_language_from_text("你好 hello", None), "en");
-        assert_eq!(detect_language_from_text("中文内容测试 hi", None), "zh");
+        assert_eq!(detect_language_from_text("你好 hello", None), "mixed");
+        assert_eq!(detect_language_from_text("中文内容测试 hi", None), "mixed");
+        assert_eq!(detect_language_from_text("今天 meeting", None), "mixed");
+        assert_eq!(detect_language_from_text("Hello 今天开会", None), "mixed");
         assert_eq!(detect_language_from_text("12345 !?", None), "unknown");
     }
 
@@ -1586,5 +1743,59 @@ mod tests {
             describe_local_strategy(&settings_with("auto", LocalBackend::Auto)),
             "Auto route: Auto-detect prefers SenseVoice first, then Whisper"
         );
+    }
+
+    #[test]
+    fn transcription_quality_prefers_substantial_mixed_text() {
+        assert!(transcription_quality("今天 meeting in Shanghai") > 0.45);
+        assert!(transcription_quality("hi 今") < 0.45);
+    }
+
+    #[test]
+    fn prefers_higher_quality_fallback_for_mixed_text() {
+        let primary = BackendCandidate {
+            transcription: BackendTranscription {
+                text: "hi 今".to_string(),
+                provider: "sensevoice".to_string(),
+                detected_language: None,
+            },
+            language: "mixed".to_string(),
+            quality: transcription_quality("hi 今"),
+        };
+        let fallback = BackendCandidate {
+            transcription: BackendTranscription {
+                text: "今天 meeting in Shanghai".to_string(),
+                provider: "whisper".to_string(),
+                detected_language: None,
+            },
+            language: "mixed".to_string(),
+            quality: transcription_quality("今天 meeting in Shanghai"),
+        };
+
+        assert!(should_prefer_fallback_result(&primary, &fallback));
+    }
+
+    #[test]
+    fn keeps_primary_when_fallback_is_only_marginally_better() {
+        let primary = BackendCandidate {
+            transcription: BackendTranscription {
+                text: "今天 meeting".to_string(),
+                provider: "sensevoice".to_string(),
+                detected_language: None,
+            },
+            language: "mixed".to_string(),
+            quality: transcription_quality("今天 meeting"),
+        };
+        let fallback = BackendCandidate {
+            transcription: BackendTranscription {
+                text: "今天 standup meeting".to_string(),
+                provider: "whisper".to_string(),
+                detected_language: None,
+            },
+            language: "mixed".to_string(),
+            quality: transcription_quality("今天 standup meeting"),
+        };
+
+        assert!(!should_prefer_fallback_result(&primary, &fallback));
     }
 }
