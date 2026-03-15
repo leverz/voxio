@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose an improvement or new capability
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user problem or workflow gap does this address?
+      placeholder: Describe the problem first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should Voxio do?
+      placeholder: Describe the proposed behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: Other options, workarounds, or rejected ideas.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include platform, language mix, local/cloud backend assumptions, or example use cases.
