@@ -334,3 +334,83 @@ fn validate_settings(settings: &Settings) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CloudModel, InjectionMode, ModelSize};
+
+    fn make_settings(
+        transcription_provider: TranscriptionProvider,
+        local_backend: LocalBackend,
+    ) -> Settings {
+        Settings {
+            hotkey: "Option+Space".to_string(),
+            language: "auto".to_string(),
+            local_backend,
+            transcription_hint: String::new(),
+            vocabulary_terms: String::new(),
+            auto_punctuation: true,
+            silence_timeout_ms: 1200,
+            injection_mode: InjectionMode::Auto,
+            transcription_provider,
+            cloud_model: CloudModel::Fast,
+            model: ModelSize::Balanced,
+            launch_at_login: false,
+        }
+    }
+
+    #[test]
+    fn requested_backend_label_matches_local_modes() {
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Local,
+                LocalBackend::Auto
+            ))),
+            "Auto route"
+        );
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Local,
+                LocalBackend::Whisper
+            ))),
+            "Whisper"
+        );
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Local,
+                LocalBackend::SenseVoice
+            ))),
+            "SenseVoice"
+        );
+    }
+
+    #[test]
+    fn requested_backend_label_matches_auto_fallback_modes() {
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Auto,
+                LocalBackend::Auto
+            ))),
+            "Auto fallback (Auto route)"
+        );
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Auto,
+                LocalBackend::Whisper
+            ))),
+            "Auto fallback (Whisper)"
+        );
+    }
+
+    #[test]
+    fn requested_backend_label_matches_cloud_mode() {
+        assert_eq!(
+            requested_backend_label(&AppState::new(make_settings(
+                TranscriptionProvider::Cloud,
+                LocalBackend::SenseVoice
+            ))),
+            "Cloud"
+        );
+    }
+}
